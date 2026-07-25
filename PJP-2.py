@@ -846,7 +846,10 @@ class PJPCompressor:
         for i in range(len(t)): t[i] ^= xor_value
         return bytes(t)
 
-    # Transform 14 is NOT bijective; skipped in pair base.
+    # Transform 14 is bijective (actually transform_13), but was originally excluded
+    # to keep the pair base exactly 52 transforms.  We keep it excluded for backward
+    # compatibility; it is not a source of non‑losslessness.
+    # See _build_pair_sequences().
 
     def transform_15(self, d):
         if len(d) < 1: return b''
@@ -1208,7 +1211,7 @@ class PJPCompressor:
         return result if result is not None else b''
 
     # ------------------------------------------------------------------
-    # Transform 26 – SHA‑256 block masking (bijective, but we exclude to be safe)
+    # Transform 26 – SHA‑256 block masking (bijective, but excluded for safety)
     # ------------------------------------------------------------------
     def transform_26(self, data: bytes) -> bytes:
         if not data: return b''
@@ -1383,7 +1386,9 @@ class PJPCompressor:
     # ------------------------------------------------------------------
     def _build_pair_sequences(self) -> List[Tuple[int, int]]:
         # Collect the first 52 transforms that are bijective on all bytes.
-        # Exclude non‑bijective: 1, 14, 22, 23, 24, 25, 26, 27
+        # Exclude non‑bijective or questionable ones: 1, 14, 22, 23, 24, 25, 26, 27.
+        # NOTE: 14 is actually bijective (transform_13), but we intentionally skip it
+        # to keep exactly 52 base transforms and avoid changing the pair set size.
         safe = []
         for i in range(1, 257):
             if i in (1, 14, 22, 23, 24, 25, 26, 27):
