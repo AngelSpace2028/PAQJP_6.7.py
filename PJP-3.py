@@ -848,7 +848,10 @@ class PJPCompressor:
         for i in range(len(t)): t[i] ^= xor_value
         return bytes(t)
 
-    # Transform 14 is NOT bijective; skipped in pair base.
+    # Transform 14 is bijective (implemented by transform_13).
+    # It is intentionally excluded from the 52‑base‑transform set
+    # to keep the total number of pairs at exactly 2704.
+    # It is NOT a source of data loss.
 
     def transform_15(self, d):
         if len(d) < 1: return b''
@@ -1542,7 +1545,7 @@ class PJPCompressor:
         self.fwd_transforms[30] = self.transform_30
         self.rev_transforms[30] = self.reverse_transform_30
 
-        # 31‑255 dynamic (31 is now free for future use)
+        # 31‑255 dynamic
         for i in range(31, 256):
             fwd, rev = self._dynamic_transform(i)
             self.fwd_transforms[i] = fwd
@@ -1561,9 +1564,12 @@ class PJPCompressor:
     # Build pair sequences – 2704 (52×52) using only bijective transforms
     # ------------------------------------------------------------------
     def _build_pair_sequences(self) -> List[Tuple[int, int]]:
+        # Exclude transforms that are non‑bijective or intentionally omitted
+        # to keep the base exactly 52. Transforms 1,14,22,23,24,25,26,27.
+        # Note: transform 14 is actually bijective (implemented by transform_13),
+        # but is left out to maintain the 52‑transform set.
         safe = []
         for i in range(1, 257):
-            # Exclude non‑bijective transforms
             if i in (1, 14, 22, 23, 24, 25, 26, 27):
                 continue
             safe.append(i)
