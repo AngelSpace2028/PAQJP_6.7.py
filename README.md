@@ -44,7 +44,7 @@ We have written 9 versions of software and me help little bit Vincent Geoghegan
 13.PJP-4
 14.PJP-5
 15.PJP-6
-16.PJP-7
+16.PJP-7 speed 25 seconds future 65536 tranfomations of 1300 KB and 256 tranfomassion 1 second
 16. v.
 All Hybrid software tested Software is working correctly without bugs and without Errors
 
