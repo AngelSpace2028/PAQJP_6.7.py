@@ -11,8 +11,8 @@ Unified PAQJP+PJP – All Transforms Combined
 - Zaden block optimization + Algorithm 36
 - Exhaustive self‑test over all 65536 indices
 - Output naming:
-    compressed   : input.pjp   (or input.pjp.lzh)
-    decompressed : custom or input_decompressed (safe default)
+    compressed   : input.txt.pjp   (or input.txt.pjp.lzh)
+    decompressed : input.txt (restores original extension)
 """
 
 import math
@@ -2620,10 +2620,9 @@ class UnifiedCompressor:
     # File I/O with simple naming
     # ------------------------------------------------------------------
     def _auto_output_name(self, infile: str, suffix: str = ".pjp") -> str:
-        """Return original_name + suffix, no timestamp."""
+        """Return original basename + suffix, preserving original extension."""
         base = os.path.basename(infile)
-        name, _ = os.path.splitext(base)
-        return f"{name}{suffix}"
+        return f"{base}{suffix}"
 
     def _atomic_write(self, path: str, data: bytes):
         dirname = os.path.dirname(path) or '.'
@@ -2693,9 +2692,9 @@ class UnifiedCompressor:
             return
         if not outfile:
             base = os.path.basename(infile)
-            # SAFE CHANGE: Append _decompressed to avoid overwriting original files
+            # Strips .pjp or .pjp.lzh to restore exactly the original filename + extension
             name_without_suffix = re.sub(r'\.pjp(\.lzh)?$', '', base)
-            outfile = name_without_suffix + "_decompressed"
+            outfile = name_without_suffix
         try:
             self._atomic_write(outfile, original)
         except Exception as e:
@@ -2774,7 +2773,7 @@ class UnifiedCompressor:
 # ------------------------------------------------------------
 def main():
     print(f"{PROGNAME} – Unified compression with all transforms from PAQJP and PJP")
-    print("Compressed output: input.pjp (or input.pjp.lzh)\n")
+    print("Compressed output: input.txt.pjp (or input.txt.pjp.lzh)\n")
     c = UnifiedCompressor()
 
     while True:
@@ -2797,7 +2796,7 @@ def main():
             c.compress_file(infile, ultra=True, use_lzh=True)
         elif choice == "4":
             infile = input("Compressed file (.pjp or .pjp.lzh): ").strip()
-            outfile = input("Output file (leave blank for default '_decompressed'): ").strip()
+            outfile = input("Output file (leave blank to restore original name): ").strip()
             c.decompress_file(infile, outfile)
         elif choice == "5":
             c.full_self_test()
