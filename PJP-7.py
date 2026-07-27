@@ -1853,7 +1853,8 @@ class UnifiedCompressor:
             lengths[heap[0][2]] = 1
             return lengths
         heapq.heapify(heap)
-        next_id = len(heap)
+        # FIX: Use len(freq) instead of len(heap) to avoid counter collisions
+        next_id = len(freq)
         while len(heap) > 1:
             f1, _, n1 = heapq.heappop(heap)
             f2, _, n2 = heapq.heappop(heap)
