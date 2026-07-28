@@ -1238,7 +1238,9 @@ class PJPCompressor:
     # Transform 27 – 6‑bit text compression (text‑only, NOT bijective)
     # ------------------------------------------------------------------
     def transform_27(self, data: bytes) -> bytes:
-        """Encode text using 6‑bit alphabet and pack into bytes."""
+        """Encode text using 6‑bit alphabet and pack into bytes.
+        If the input cannot be represented in the 6‑bit alphabet,
+        returns the original data unchanged (pass‑through)."""
         try:
             text = data.decode('utf-8')
         except UnicodeDecodeError:
@@ -1268,10 +1270,25 @@ class PJPCompressor:
         return length_bytes + bytes(out)
 
     def reverse_transform_27(self, data: bytes) -> bytes:
+        """Decode a 6‑bit packed stream. If the data is not a valid 6‑bit
+        stream, returns the original data unchanged."""
         if len(data) < 4:
             return data
         num_chars = struct.unpack('<I', data[:4])[0]
         packed = data[4:]
+
+        # Check if packed length matches the expected length
+        expected_packed_len = (num_chars * 6 + 7) // 8
+        if len(packed) != expected_packed_len:
+            return data  # Not a valid 6‑bit stream
+
+        # Check that padding bits in the last byte are zero
+        pad_bits = (8 - (num_chars * 6) % 8) % 8
+        if pad_bits > 0 and packed:
+            last_byte = packed[-1]
+            mask = (1 << pad_bits) - 1
+            if (last_byte & mask) != 0:
+                return data  # Padding bits not zero
 
         bits = []
         for b in packed:
@@ -1283,18 +1300,16 @@ class PJPCompressor:
             return data
 
         chars = []
-        for i in range(num_chars):
-            val = 0
-            for j in range(6):
-                val = (val << 1) | bits[i*6 + j]
-            if val < 64:
-                chars.append(SIXBIT_TO_CHAR[val])
-            else:
-                return data
-
         try:
+            for i in range(num_chars):
+                val = 0
+                for j in range(6):
+                    val = (val << 1) | bits[i*6 + j]
+                if val >= 64:
+                    return data
+                chars.append(SIXBIT_TO_CHAR[val])
             return ''.join(chars).encode('utf-8')
-        except UnicodeEncodeError:
+        except (IndexError, UnicodeEncodeError):
             return data
 
     # ------------------------------------------------------------------
