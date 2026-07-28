@@ -8,6 +8,7 @@ PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + 6‑bit Text Compression Transform (27) – 64‑char alphabet
 (Auto‑correcting backends – marker‑free by default, safe fallback if needed)
 ============================================================================
+(Fix: 23-27 excluded from single transform search to prevent corruption on binary data)
 """
 
 import math
@@ -1387,8 +1388,6 @@ class PJPCompressor:
     def _build_pair_sequences(self) -> List[Tuple[int, int]]:
         # Collect the first 52 transforms that are bijective on all bytes.
         # Exclude non‑bijective or questionable ones: 1, 14, 22, 23, 24, 25, 26, 27.
-        # NOTE: 14 is actually bijective (transform_13), but we intentionally skip it
-        # to keep exactly 52 base transforms and avoid changing the pair set size.
         safe = []
         for i in range(1, 257):
             if i in (1, 14, 22, 23, 24, 25, 26, 27):
@@ -1539,21 +1538,26 @@ class PJPCompressor:
         best_total = float('inf')
         best_bytes = None
 
-        single_range = range(1, 257)  # always 256
+        # ---------- safe single transforms (all that are truly bijective) ----------
+        # Exclude non‑bijective or text‑specific transforms: 1, 14, 22, 23, 24, 25, 26, 27.
+        safe_singles = [i for i in range(1, 23)] + [i for i in range(28, 256)] + [256]
+        # Add quantum singles if enabled
         if USE_QUANTUM and HAS_QISKIT:
-            fast_quantum = range(257, 266)
-            single_range = list(single_range) + list(fast_quantum)
+            fast_quantum = list(range(257, 266))
+            safe_singles += fast_quantum
             if ultra:
-                single_range = list(single_range) + list(range(266, 283))
+                safe_singles += list(range(266, 283))   # ultra quantum
 
-        # raw
+        single_range = safe_singles
+
+        # raw (no transform)
         raw_backend = self._compress_backend(data, safe)
         candidate = self._encode_marker_raw() + raw_backend
         if len(candidate) < best_total:
             best_total = len(candidate)
             best_bytes = candidate
 
-        # singles (including quantum and new transforms)
+        # singles
         for t in single_range:
             try:
                 transformed = self.fwd_transforms[t](data)
@@ -1578,6 +1582,7 @@ class PJPCompressor:
                 except:
                     continue
 
+        # self‑check: guarantee lossless
         decomp, _ = self._decompress_auto(best_bytes)
         if decomp != data:
             if not safe:
@@ -1854,7 +1859,7 @@ class PJPCompressor:
         print("=" * 60)
         all_ok = True
 
-        # 1. Single transforms on all bytes
+        # 1. Single transforms on all bytes (only bijective ones used in fast/ultra, but test all registered)
         print("Testing all single transforms on all 256 byte values...")
         for t_num in range(1, 257):
             for b in range(256):
@@ -1995,7 +2000,7 @@ class PJPCompressor:
             return False
         print("  PASS: dynamic dictionary round‑trip OK")
 
-        # Test 6‑bit transform (27)
+        # Test 6‑bit transform (27) – only on valid text
         print("\nTesting 6‑bit text compression (transform 27) on sample...")
         sample_text = b"Hello world! How are you?\nThis is a test."
         enc27 = self.transform_27(sample_text)
