@@ -1140,15 +1140,17 @@ class UnifiedCompressor:
     def reverse_transform_26(self, data: bytes) -> bytes:
         return self.transform_26(data)
 
-    # 27 – 6‑bit text compression (PJP's 27) -> **BUG FIX APPLIED HERE**
+    # 27 – 6‑bit text compression (PJP's 27) – FIXED for unambiguous pass‑through
     def transform_27(self, data: bytes) -> bytes:
+        """6‑bit text compression. Prefixes with \x01 if encoded, \x00 if raw."""
         try:
             text = data.decode('utf-8')
         except UnicodeDecodeError:
-            return data
+            return b'\x00' + data   # not text → store raw
         for ch in text:
             if ch not in CHAR_TO_6BIT:
-                return data
+                return b'\x00' + data   # contains unsupported characters → raw
+        # All characters are in the 64‑char alphabet → 6‑bit encode
         bits = []
         for ch in text:
             val = CHAR_TO_6BIT[ch]
@@ -1163,27 +1165,35 @@ class UnifiedCompressor:
                 byte = (byte << 1) | bits[i + j]
             out.append(byte)
         length_bytes = struct.pack('<I', len(text))
-        return length_bytes + bytes(out)
+        return b'\x01' + length_bytes + bytes(out)
 
     def reverse_transform_27(self, data: bytes) -> bytes:
-        if len(data) < 4:
+        """Decompress 6‑bit text. Expects 1‑byte flag + payload."""
+        if len(data) < 1:
+            return b''
+        flag = data[0]
+        if flag == 0:
+            # Raw pass‑through
+            return data[1:]
+        if flag != 1:
+            # Unknown flag – treat as raw to be safe (fallback)
             return data
-        num_chars = struct.unpack('<I', data[:4])[0]
-        packed = data[4:]
-
-        # CRITICAL FIX: Detect pass-through data from transform_23
+        payload = data[1:]
+        if len(payload) < 4:
+            return data  # too short
+        num_chars = struct.unpack('<I', payload[:4])[0]
+        packed = payload[4:]
         needed_bytes = (num_chars * 6 + 7) // 8
         if len(packed) != needed_bytes:
-            return data
-
-        # Check that padding bits are zero (if any)
+            return data  # length mismatch → something is wrong
+        # Check padding bits
         pad_bits = (8 - (num_chars * 6) % 8) % 8
         if pad_bits > 0 and packed:
             last_byte = packed[-1]
             mask = (1 << pad_bits) - 1
             if (last_byte & mask) != 0:
-                return data
-
+                return data  # invalid padding → pass through original
+        # Decode bits
         bits = []
         for b in packed:
             for i in range(7, -1, -1):
