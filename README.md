@@ -49,4 +49,4 @@ We have written 9 versions of software and me help little bit Vincent Geoghegan
 17. v.
 All Hybrid software tested Software is working correctly without bugs and without Errors
 
-The best our PJP-7, PJP-6
+The best our PJP-8,PJP-7, PJP-6
