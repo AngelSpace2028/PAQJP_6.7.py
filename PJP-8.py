@@ -2027,10 +2027,12 @@ class UnifiedCompressor:
         This makes the most common pattern become 0x00000000, increasing zero bytes.
         """
         if len(data) < 4:
-            # Pad to 4 bytes with zeros for simplicity
-            padded = data + b'\x00' * (4 - len(data) % 4)
-            # No frequent pattern; use key = 0
-            return b'\x00\x00\x00\x00' + padded
+            pad_len = 4 - len(data)
+            key = 0  # no frequent pattern
+            header = bytes([pad_len]) + key.to_bytes(4, 'little')
+            padded = data + b'\x00' * pad_len
+            # XOR with key (which is 0) – no change
+            return header + padded
         # Count 4‑byte blocks (little‑endian)
         n = len(data)
         pad_len = (4 - n % 4) % 4
