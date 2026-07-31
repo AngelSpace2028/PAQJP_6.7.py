@@ -48,5 +48,6 @@ We have written 9 versions of software and me help little bit Vincent Geoghegan
 17. PJP-8 Hybrid compression software use in quantum 8-49 qubits block 1024 bytes 
 18. option 2 is 4.3 billion ultra calculated the be mode PJP-9 about 300 seconds 1KB
 All Hybrid software tested Software is working correctly without bugs and without Errors
+10 PJP-10 281 trillions varations count option 4
 
-The best our the best PJP-9
+The best our the best PJP-10
