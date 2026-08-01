@@ -3,7 +3,7 @@ UPGRADE\_PAQJPVG Compression hybrid Software PJP-2,3 Quantum software is working
 PAQJPVG_8.5-4 Replit App by Jurijus Pacalovas 8.5L-4 PAQ level 9 and zstandard level 22
 https://6d12ff49-574e-490c-a27e-ce0b42018552-00-2nsbwpijno5md.kirk.replit.dev
 
-PAQJP_8.2,3,4, 5, 5L, 6, 8.8 8.9 9.0 PJP, PJP-2,3,4 The best paq level default and zstandard level 22 Done all 2026 year in May 6 by Jurijus Pacalovas and Vincent Geoghegan (I recommend version 8.4 it’s 1.3KB/s)
+PAQJP_8.2,3,4, 5, 5L, 6, 8.8 8.9 9.0 PJP, PJP-10The best paq level default and zstandard level 22 Done all 2026 year in May 6 by Jurijus Pacalovas and Vincent Geoghegan (I recommend version 8.4 it’s 1.3KB/s)
 
 Python 3.7.4
 
@@ -39,14 +39,6 @@ We have written 9 versions of software and me help little bit Vincent Geoghegan
 8.PAQJP_8.9;
 9.PAQJP_9.0
 10.PJP
-11.PJP-2
-12.PJP-3
-13.PJP-4
-14.PJP-5
-15.PJP-6
-16.PJP-7 speed 25 seconds future 65536 tranfomations of 1300 KB and 256 tranfomassion 1 second
-17. PJP-8 Hybrid compression software use in quantum 8-49 qubits block 1024 bytes 
-18. option 2 is 4.3 billion ultra calculated the be mode PJP-9 about 300 seconds 1KB
 All Hybrid software tested Software is working correctly without bugs and without Errors
 10 PJP-10 281 trillions varations count option 4
 
