@@ -2953,17 +2953,17 @@ class UnifiedCompressor:
 
         if best_candidate is None:
             fallback = self._encode_marker_raw() + self._compress_backend(data)
-            decomp = self._decompress_lzh_pipeline(fallback)
+            decomp, _ = self._decompress_auto(fallback)  # FIXED: use universal decompressor
             if decomp != data:
-                raise RuntimeError("Fallback LZH compression failed.")
+                raise RuntimeError("Fallback compression failed.")
             return fallback
 
-        decomp = self._decompress_lzh_pipeline(best_candidate)
+        decomp, _ = self._decompress_auto(best_candidate)  # FIXED: use universal decompressor
         if decomp == data:
             return best_candidate
 
         fallback = self._encode_marker_raw() + self._compress_backend(data)
-        decomp = self._decompress_lzh_pipeline(fallback)
+        decomp, _ = self._decompress_auto(fallback)  # FIXED: use universal decompressor
         if decomp != data:
             raise RuntimeError("Fallback compression failed.")
         return fallback
@@ -2992,8 +2992,7 @@ class UnifiedCompressor:
         else:
             return None
         if transformed is None: return None
-        if not seq:
-            return transformed
+        if not seq: return transformed
         return self._reverse_sequence(transformed, seq)
 
     # ------------------------------------------------------------------
@@ -3024,7 +3023,9 @@ class UnifiedCompressor:
             return b'', None
         # check if LZH pipeline marker (0xFF or 0xFE)
         if payload and (payload[0] == 0xFF or payload[0] == 0xFE):
-            return self._decompress_lzh_pipeline(data)[0], seq
+            result = self._decompress_lzh_pipeline(data)
+            if result is None: return b'', None
+            return result, None
         res = self._decompress_backend(payload)
         if res is None:
             return b'', None
@@ -3163,7 +3164,7 @@ class UnifiedCompressor:
         test_data = bytes(rng.randint(0, 255) for _ in range(1000))
         try:
             compressed = self.compress_with_lzh(test_data, ultra=True, time_limit=30)
-            decompressed = self._decompress_lzh_pipeline(compressed)
+            decompressed, _ = self._decompress_auto(compressed)  # FIXED: use universal decompressor
             if decompressed != test_data:
                 print("  FAIL: LZH+RLE+backend pipeline mismatch")
                 return False
