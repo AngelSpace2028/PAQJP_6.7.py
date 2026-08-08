@@ -49,8 +49,8 @@ We have written 9 versions of software and me help little bit Vincent Geoghegan
 18.PJP-9
 All Hybrid software tested Software is working correctly without bugs and without Errors
 19. PJP-10 281 trillions varations count option 4
-20. PJP-11
+20. PJP-11 (always losslessness 100%)
 21. PJP-12
 22. PJP-13
 
-The best our the best PJP-13
+The best our the best PJP-11 and happen in happen rare truly random compression binary files.
