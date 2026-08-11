@@ -12,7 +12,7 @@ Unified PAQJP+PJP – All Transforms Combined (Lossless)
 - Exhaustive self‑test
 - Output naming: input.txt.pjp (or .pjp.lzh)
 - LZH pipeline enhanced with RLE + backend compression (PAQ / Zstd)
-- Calculus2⁶⁴ transform (index 58) – 33‑qubit key search + Gamma coding
+- Calculus2⁶⁴ transform (index 58) – now 100% lossless (fixed gamma coding)
 - NEW: Prints compression ratio, never inflates, verifies losslessness,
        includes random binary file test.
 All transforms are mathematically invertible – 100% lossless when used
@@ -2126,8 +2126,11 @@ class UnifiedCompressor:
         return bytes(transformed)
 
     # ------------------------------------------------------------------
-    # NEW TRANSFORM 58 – Calculus2⁶⁴ (33‑qubit key search + Gamma coding)
+    # NEW TRANSFORM 58 – Calculus2⁶⁴ (lossless – fixed gamma coding)
     # ------------------------------------------------------------------
+    # Gamma encoding now uses a +1 offset to map 0..2^64‑1 to positive integers.
+    # This avoids the ambiguity between gamma(0) and gamma(1) in the original.
+
     def _quantum_perm_to_key(self, seed: int) -> int:
         """Maps a 33‑bit seed to a 32‑bit key using quantum‑inspired hashing."""
         data = seed.to_bytes(8, 'big') + b'qkey58'
@@ -2135,52 +2138,57 @@ class UnifiedCompressor:
         return struct.unpack('<I', h[:4])[0]
 
     def _gamma_encoded_len(self, val: int) -> int:
-        """Return bit length of Gamma code for a 64‑bit value."""
-        if val == 0:
-            return 1
-        L = val.bit_length()  # ≥1
+        """Return bit length of Gamma code for a value shifted by +1 (positive)."""
+        # val is already the post‑shift positive integer (1..2^64)
+        if val <= 0:
+            val = 1
+        L = val.bit_length()  # >= 1
         return 1 + 2 * (L - 1)
 
     def _gamma_encode(self, val: int) -> List[int]:
-        """Return list of bits (0/1) of Gamma code for val."""
-        if val == 0:
-            return [0]
-        L = val.bit_length()
-        # unary: L-1 ones, then zero
+        """Return Elias gamma bits for val+1 (positive)."""
+        positive = val + 1
+        L = positive.bit_length()  # >= 1
+        # unary part: L-1 ones, then a zero
         bits = [1] * (L - 1) + [0]
-        # rest of value (excluding leading 1)
+        # remainder of binary representation (skip the leading 1)
         for i in range(L - 2, -1, -1):
-            bits.append((val >> i) & 1)
+            bits.append((positive >> i) & 1)
         return bits
 
     def _gamma_decode_stream(self, bit_string: str, num_values: int) -> List[int]:
-        """Decode Gamma codes from bit string, return list of values."""
+        """Decode gamma codes from bit string, then subtract 1 to recover original values."""
         values = []
         i = 0
         n = len(bit_string)
         while len(values) < num_values and i < n:
-            if bit_string[i] == '0':
+            if bit_string[i] == '1':
+                # count leading ones
+                cnt = 0
+                while i < n and bit_string[i] == '1':
+                    cnt += 1
+                    i += 1
+                if i >= n or bit_string[i] != '0':
+                    break
+                i += 1  # skip terminating zero
+                if i + cnt > n:
+                    break
+                val_bits = bit_string[i:i + cnt]
+                # value = 2^cnt + integer from val_bits (if cnt == 0, value = 1)
+                if cnt == 0:
+                    positive = 1
+                else:
+                    positive = (1 << cnt) | int(val_bits, 2)
+                values.append(positive - 1)
+                i += cnt
+            else:
+                # bit_string[i] == '0' → this is a gamma code for 1 (which after -1 becomes 0)
+                i += 1
                 values.append(0)
-                i += 1
-                continue
-            # count leading ones
-            cnt = 0
-            while i < n and bit_string[i] == '1':
-                cnt += 1
-                i += 1
-            if i >= n or bit_string[i] != '0':
-                break
-            i += 1  # skip the terminating zero
-            if i + cnt > n:
-                break
-            val_bits = bit_string[i:i + cnt]
-            val = (1 << cnt) | int(val_bits, 2) if cnt > 0 else 1
-            values.append(val)
-            i += cnt
         return values
 
     def _find_best_32bit_key_quantum(self, data: bytes, time_limit: float = 10.0) -> int:
-        """Search 33‑qubit space for best 32‑bit subtraction key to minimize Gamma length."""
+        """Search for a 32‑bit subtraction key that minimizes total gamma bit length."""
         pad_len = (8 - len(data) % 8) % 8
         padded = data + b'\x00' * pad_len
         num_blocks = len(padded) // 8
@@ -2188,25 +2196,24 @@ class UnifiedCompressor:
         best_key = 0
         best_cost = float('inf')
         start_time = time.time()
-        max_seed = 1 << 33   # 2^33
-        # Limit iterations to something feasible within time_limit
+        max_seed = 1 << 33
         for seed in range(max_seed):
             if time.time() - start_time > time_limit:
                 break
             key = self._quantum_perm_to_key(seed)
-            # compute total gamma bit length for all values after subtracting key
             total = 0
             for v in values:
+                # encoded value is (v - key) mod 2^64, then +1 inside gamma
                 total += self._gamma_encoded_len((v - key) & 0xFFFFFFFFFFFFFFFF)
             if total < best_cost:
                 best_cost = total
                 best_key = key
-                if total == num_blocks:  # all zeros -> perfect
+                if total == num_blocks:  # all zeros → gamma(0+1)=1 bit each
                     break
         return best_key
 
     def transform_58(self, data: bytes) -> bytes:
-        """Calculus2⁶⁴ – subtract best 32‑bit key, then Gamma‑encode all 64‑bit blocks."""
+        """Calculus2⁶⁴ – subtract best key, then Gamma‑encode all 64‑bit blocks (lossless)."""
         if not data:
             return b'\x00' * 13   # empty header
         best_key = self._find_best_32bit_key_quantum(data)
@@ -2214,19 +2221,19 @@ class UnifiedCompressor:
         padded = data + b'\x00' * pad_len
         values = [int.from_bytes(padded[i:i+8], 'little') for i in range(0, len(padded), 8)]
 
-        # Gamma‑encode each (value - key) mod 2^64
+        # Gamma‑encode each (value - key) mod 2^64, then add 1 inside the encoder
         bits = []
         for v in values:
             encoded = self._gamma_encode((v - best_key) & 0xFFFFFFFFFFFFFFFF)
             bits.extend(encoded)
 
-        # Header: pad_len (1 byte) + original length (8 bytes, little‑endian) + key (4 bytes, little‑endian)
+        # Header: pad_len (1 byte) + original length (8 bytes) + key (4 bytes)
         header = bytearray()
         header.append(pad_len)
         header.extend(struct.pack('<Q', len(data)))
         header.extend(struct.pack('<I', best_key))
 
-        # Pack bits
+        # Pack bits into bytes
         pad_bits = (8 - len(bits) % 8) % 8
         bits.extend([0] * pad_bits)
         out = bytearray(header)
@@ -2238,7 +2245,7 @@ class UnifiedCompressor:
         return bytes(out)
 
     def reverse_transform_58(self, data: bytes) -> bytes:
-        """Reverse Calculus2⁶⁴: decode Gamma stream, add back key, restore original length."""
+        """Reverse Calculus2⁶⁴: decode gamma, add key, restore original length."""
         if len(data) < 13:
             return data   # corrupted, pass through
         pad_len = data[0]
@@ -2253,11 +2260,10 @@ class UnifiedCompressor:
                 bit_list.append(str((b >> i) & 1))
         bit_str = ''.join(bit_list)
 
-        # Number of 8‑byte blocks we need to decode
-        total_blocks = (orig_len + pad_len + 7) // 8   # padded length / 8
+        total_blocks = (orig_len + pad_len + 7) // 8
         vals = self._gamma_decode_stream(bit_str, total_blocks)
         if len(vals) != total_blocks:
-            # decoding failed → pass through raw (fallback)
+            # decoding failed → fallback raw
             return data
 
         out = bytearray()
@@ -2364,7 +2370,7 @@ class UnifiedCompressor:
         self.fwd_transforms[57] = self.transform_57
         self.rev_transforms[57] = self.reverse_transform_57
 
-        # 58 – Calculus2⁶⁴ (new)
+        # 58 – Calculus2⁶⁴ (lossless now)
         self.fwd_transforms[58] = self.transform_58
         self.rev_transforms[58] = self.reverse_transform_58
 
