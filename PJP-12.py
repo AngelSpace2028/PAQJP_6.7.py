@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Unified PAQJP+PJP – All Transforms Combined (Lossless)
+Unified PAQJP+PJP – All Transforms Combined (100% Verified Lossless)
 =======================================================
 - 256 base transforms + 65,535 transform pairs (Ultra mode)
-- NEW: Deep Ultra mode – sequences of 1–3 pairs → up to 281 trillion variations
+- Deep Ultra mode – sequences of 1–3 pairs → up to 281 trillion variations
 - Ultra++ mode – exhaustive 65,536 pairs + deep multi‑pair (option 4)
 - Time‑limited modes (default 300s)
-- Final verification + fallback to raw+backend
+- **MANDATORY** final verification before writing – fallback to raw+backend
 - Quantum‑inspired transforms (optional)
-- Exhaustive self‑test
-- LZH pipeline enhanced with RLE + backend compression (PAQ / Zstd)
-- **NEW** 2‑byte frequency‑based XOR preprocessing
+- Exhaustive self‑test (all 65535 pairs + pipeline)
+- LZH pipeline with RLE + backend compression (PAQ / Zstd)
+- 2‑byte frequency‑based XOR preprocessing
 """
 
 import math
@@ -2744,13 +2744,16 @@ class UnifiedCompressor:
                         best_candidate = pre_candidate
                         best_len = len(pre_candidate)
 
-        if best_candidate is None:
+        # Final mandatory verification before returning
+        if best_candidate is not None and self._decompress_full(best_candidate) == data:
+            return best_candidate
+        else:
+            # Fallback to raw + backend, which is guaranteed lossless
             fallback = self._encode_marker_raw() + self._compress_backend(data)
             if self._decompress_full(fallback) == data:
-                best_candidate = fallback
+                return fallback
             else:
-                raise RuntimeError("Fallback compression failed.")
-        return best_candidate
+                raise RuntimeError("Internal error: fallback compression corrupted.")
 
     def _compress_core(self, data: bytes, ultra: bool, time_limit: float) -> Optional[bytes]:
         start_time = time.time()
@@ -2960,13 +2963,15 @@ class UnifiedCompressor:
                         best_candidate = candidate
                         best_len = len(candidate)
 
-        if best_candidate is None:
+        # Final mandatory verification before returning
+        if best_candidate is not None and self._decompress_full(best_candidate) == data:
+            return best_candidate
+        else:
             fallback = self._encode_marker_raw() + self._compress_backend(data)
             if self._decompress_full(fallback) == data:
-                best_candidate = fallback
+                return fallback
             else:
-                raise RuntimeError("Fallback LZH compression failed.")
-        return best_candidate
+                raise RuntimeError("Internal error: LZH fallback compression corrupted.")
 
     def _lzh_compress_core(self, data: bytes, ultra: bool, time_limit: float) -> Optional[bytes]:
         start_time = time.time()
@@ -3070,17 +3075,11 @@ class UnifiedCompressor:
             with open(infile, 'rb') as f: data = f.read()
         except Exception as e:
             print(f"Error reading file: {e}"); return
-        if data.startswith(b'DICT'):
-            if data.startswith(b'DICT\x01'):
-                original = self._decompress_static_dict(data)
-            elif data.startswith(b'DICT\x02'):
-                original = self._decompress_dynamic_dict(data)
-            else:
-                print("Unknown dictionary format"); return
-        elif data.startswith(b'LINE'):
-            original = self._decompress_line_dict(data)
-        else:
-            original = self._decompress_full(data)
+        # Dictionary formats are not fully implemented; they are safe stubs
+        if data.startswith(b'DICT') or data.startswith(b'LINE'):
+            print("Dictionary compression is not yet implemented in this version.")
+            return
+        original = self._decompress_full(data)
         if original is None:
             print("Decompression failed."); return
         if not outfile:
