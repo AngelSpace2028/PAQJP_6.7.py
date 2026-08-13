@@ -11,6 +11,7 @@ Unified PAQJP+PJP – All Transforms Combined (Lossless)
 - Quantum‑inspired transforms (optional)
 - Exhaustive self‑test
 - Output naming: input.txt.pjp (or .pjp.lzh)
+- NOW with SHA‑256 integrity checksum appended to compressed files.
 """
 
 import math
@@ -1133,7 +1134,12 @@ class UnifiedCompressor:
             return None
 
     def transform_25(self, data: bytes) -> bytes:
-        return self._dynamic_dict_tokenize(data, index_bytes=3)
+        if not data:
+            return b'\x00'
+        try:
+            return self._dynamic_dict_tokenize(data, index_bytes=3)
+        except Exception:
+            return b'\x00' + data
     def reverse_transform_25(self, data: bytes) -> bytes:
         result = self._dynamic_dict_detokenize(data)
         return result if result is not None else b''
@@ -2665,7 +2671,10 @@ class UnifiedCompressor:
                 best_len = len(candidate)
 
         try_candidate(self._encode_marker_raw(), data)
-        for t in range(1, 257):
+        max_single = 256
+        if USE_QUANTUM and HAS_QISKIT:
+            max_single = 256 + 8   # include quantum transforms
+        for t in range(1, max_single + 1):
             if time_limit and time.time() - start_time > time_limit:
                 break
             try:
@@ -2688,15 +2697,19 @@ class UnifiedCompressor:
         if best_candidate is None:
             best_candidate = self._encode_marker_raw() + self._compress_backend(data)
 
-        decomp, _ = self._decompress_auto(best_candidate)
-        if decomp == data:
-            return best_candidate
+        try:
+            decomp, _ = self._decompress_auto(best_candidate)
+            if decomp != data:
+                best_candidate = self._encode_marker_raw() + self._compress_backend(data)
+                decomp, _ = self._decompress_auto(best_candidate)
+                if decomp != data:
+                    raise RuntimeError("Fallback compression also failed – this should never happen.")
+        except Exception as e:
+            raise RuntimeError(f"Verification failed: {e}")
 
-        fallback = self._encode_marker_raw() + self._compress_backend(data)
-        decomp_fb, _ = self._decompress_auto(fallback)
-        if decomp_fb != data:
-            raise RuntimeError("Fallback compression also failed – this should never happen.")
-        return fallback
+        # Append SHA-256 hash of original data for integrity verification during decompression
+        original_hash = hashlib.sha256(data).digest()
+        return best_candidate + original_hash
 
     # ------------------------------------------------------------------
     # NEW: Deep Ultra search using multiple pairs
@@ -2742,13 +2755,20 @@ class UnifiedCompressor:
                 best_candidate = candidate
                 best_len = len(candidate)
 
-        decomp, _ = self._decompress_auto(best_candidate)
-        if decomp != data:
-            fallback = raw_header + self._compress_backend(data)
-            if self._decompress_auto(fallback)[0] != data:
-                raise RuntimeError("Fallback compression failed")
-            return fallback
-        return best_candidate
+        # Final verification
+        try:
+            decomp, _ = self._decompress_auto(best_candidate)
+            if decomp != data:
+                best_candidate = self._encode_marker_raw() + self._compress_backend(data)
+                decomp, _ = self._decompress_auto(best_candidate)
+                if decomp != data:
+                    raise RuntimeError("Fallback compression failed")
+        except Exception:
+            best_candidate = self._encode_marker_raw() + self._compress_backend(data)
+
+        # Append hash
+        original_hash = hashlib.sha256(data).digest()
+        return best_candidate + original_hash
 
     def compress_file_deep_ultra(self, infile: str, outfile: str = "",
                                  max_pairs: int = 3, time_limit: float = 300.0):
@@ -2785,7 +2805,10 @@ class UnifiedCompressor:
                 best_len = len(candidate)
 
         try_candidate(self._encode_marker_raw(), data)
-        for t in range(1, 257):
+        max_single = 256
+        if USE_QUANTUM and HAS_QISKIT:
+            max_single = 256 + 8
+        for t in range(1, max_single + 1):
             if time_limit and time.time() - start_time > time_limit: break
             try:
                 transformed = self.fwd_transforms[t](data)
@@ -2802,21 +2825,21 @@ class UnifiedCompressor:
                 except: continue
 
         if best_candidate is None:
-            fallback = self._encode_marker_raw() + self._compress_backend(data)
-            decomp = self._decompress_lzh_pipeline(fallback)
+            best_candidate = self._encode_marker_raw() + self._compress_backend(data)
+
+        try:
+            decomp = self._decompress_lzh_pipeline(best_candidate)
             if decomp != data:
-                raise RuntimeError("Fallback LZH compression failed.")
-            return fallback
+                best_candidate = self._encode_marker_raw() + self._compress_backend(data)
+                decomp = self._decompress_lzh_pipeline(best_candidate)
+                if decomp != data:
+                    raise RuntimeError("Fallback compression failed.")
+        except Exception as e:
+            raise RuntimeError(f"Verification failed: {e}")
 
-        decomp = self._decompress_lzh_pipeline(best_candidate)
-        if decomp == data:
-            return best_candidate
-
-        fallback = self._encode_marker_raw() + self._compress_backend(data)
-        decomp = self._decompress_lzh_pipeline(fallback)
-        if decomp != data:
-            raise RuntimeError("Fallback compression failed.")
-        return fallback
+        # Append hash
+        original_hash = hashlib.sha256(data).digest()
+        return best_candidate + original_hash
 
     def _decompress_lzh_pipeline(self, data: bytes) -> Optional[bytes]:
         offset, seq = self._decode_header(data)
@@ -2909,42 +2932,59 @@ class UnifiedCompressor:
 
     def decompress_file(self, infile: str, outfile: str = ""):
         try:
-            with open(infile, 'rb') as f: data = f.read()
+            with open(infile, 'rb') as f:
+                data = f.read()
         except Exception as e:
             print(f"Error reading file: {e}"); return
-        if data.startswith(b'DICT'):
-            if data.startswith(b'DICT\x01'):
-                original = self._decompress_static_dict(data)
-            elif data.startswith(b'DICT\x02'):
-                original = self._decompress_dynamic_dict(data)
+
+        # Minimum length: at least 32 bytes for SHA-256 hash
+        if len(data) < 32:
+            print("Invalid file: too short to contain a checksum."); return
+
+        stored_hash = data[-32:]
+        compressed_data = data[:-32]
+
+        if compressed_data.startswith(b'DICT'):
+            if compressed_data.startswith(b'DICT\x01'):
+                original = self._decompress_static_dict(compressed_data)
+            elif compressed_data.startswith(b'DICT\x02'):
+                original = self._decompress_dynamic_dict(compressed_data)
             else:
                 print("Unknown dictionary format"); return
-        elif data.startswith(b'LINE'):
-            original = self._decompress_line_dict(data)
+        elif compressed_data.startswith(b'LINE'):
+            original = self._decompress_line_dict(compressed_data)
         else:
-            offset, seq = self._decode_header(data)
-            if offset == 0:
-                # Try multi‑pair
-                res = self._decode_multi_pair_header(data)
-                if res is not None:
-                    offset, pairs = res
-                    payload = data[offset:]
-                    decompressed = self._decompress_backend(payload)
-                    if decompressed is None:
+            try:
+                if compressed_data[0] == 251:
+                    res = self._decode_multi_pair_header(compressed_data)
+                    if res is not None:
+                        offset, pairs = res
+                        payload = compressed_data[offset:]
+                        decompressed = self._decompress_backend(payload)
+                        if decompressed is None:
+                            print("Decompression failed."); return
+                        original = decompressed
+                        for t1, t2 in reversed(pairs):
+                            original = self.rev_transforms[t2](original)
+                            original = self.rev_transforms[t1](original)
+                    else:
+                        print("Decompression failed: invalid multi-pair header."); return
+                else:
+                    original, _ = self._decompress_auto(compressed_data)
+                    if original is None:
                         print("Decompression failed."); return
-                    original = decompressed
-                    for t1, t2 in reversed(pairs):
-                        original = self.rev_transforms[t2](original)
-                        original = self.rev_transforms[t1](original)
-                else:
-                    print("Decompression failed: invalid header."); return
-            else:
-                if offset < len(data) and data[offset] == 0xFF:
-                    original = self._decompress_lzh_pipeline(data)
-                else:
-                    original, _ = self._decompress_auto(data)
+            except Exception as e:
+                print(f"Decompression error: {e}"); return
+
         if original is None:
             print("Decompression failed."); return
+
+        # Verify checksum
+        computed_hash = hashlib.sha256(original).digest()
+        if computed_hash != stored_hash:
+            print("ERROR: checksum mismatch – file may be corrupted.")
+            return
+
         if not outfile:
             base = os.path.basename(infile)
             name_without_suffix = re.sub(r'\.pjp(\.lzh)?$', '', base)
@@ -2990,7 +3030,7 @@ class UnifiedCompressor:
         test_data = bytes(rng.randint(0, 255) for _ in range(1000))
         try:
             compressed = self.compress_with_lzh(test_data, ultra=True, time_limit=30)
-            decompressed = self._decompress_lzh_pipeline(compressed)
+            decompressed = self._decompress_lzh_pipeline(compressed[:-32])  # strip hash for old test
             if decompressed != test_data:
                 print("  FAIL: LZH pipeline mismatch")
                 return False
