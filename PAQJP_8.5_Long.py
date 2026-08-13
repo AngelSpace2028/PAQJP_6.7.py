@@ -21,6 +21,7 @@ import math
 import random
 import sys
 import decimal
+import hashlib
 from typing import Optional, List, Tuple, Dict, Callable
 
 # ------------------------------------------------------------
@@ -48,17 +49,22 @@ PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p**0.
 PI_DIGITS = [79, 17, 111]
 
 # ------------------------------------------------------------
-# Helper: nearest prime
+# Helper: nearest prime (always within [2,255])
 # ------------------------------------------------------------
 def find_nearest_prime_around(n: int) -> int:
-    o = 0
-    while True:
-        c1, c2 = n - o, n + o
-        if c1 >= 2 and all(c1 % d != 0 for d in range(2, int(c1**0.5)+1)):
+    """
+    Return the nearest prime to n, but always within [2, 255].
+    """
+    n = n % 256
+    for offset in range(256):
+        c1 = n - offset
+        c2 = n + offset
+        if 2 <= c1 <= 255 and all(c1 % d != 0 for d in range(2, int(c1**0.5) + 1)):
             return c1
-        if c2 >= 2 and all(c2 % d != 0 for d in range(2, int(c2**0.5)+1)):
+        if 2 <= c2 <= 255 and all(c2 % d != 0 for d in range(2, int(c2**0.5) + 1)):
             return c2
-        o += 1
+    # Fallback (should never be reached)
+    return 251
 
 # ------------------------------------------------------------
 # Main Compressor Class
@@ -476,7 +482,7 @@ class PAQJPCompressor:
         t = bytearray(d)
         sh = len(d) % len(self.PI_DIGITS)
         pi_rot = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
-        p = find_nearest_prime_around(len(d) % 256)
+        p = find_nearest_prime_around(len(d) % 256) & 0xFF
         for i in range(len(t)):
             t[i] ^= p
         for _ in range(r):
@@ -489,7 +495,7 @@ class PAQJPCompressor:
         t = bytearray(d)
         sh = len(d) % len(self.PI_DIGITS)
         pi_rot = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
-        p = find_nearest_prime_around(len(d) % 256)
+        p = find_nearest_prime_around(len(d) % 256) & 0xFF
         seed = self.get_seed(len(d) % len(self.seed_tables), len(d))
         for i in range(len(t)):
             t[i] ^= p ^ seed
@@ -549,7 +555,7 @@ class PAQJPCompressor:
         prime_values = []
         count = 0
         while count < repeats:
-            current_value = find_nearest_prime_around(current_value)
+            current_value = find_nearest_prime_around(current_value) & 0xFF
             prime_values.append(current_value)
             count += 1
         t = bytearray(d)
@@ -571,7 +577,7 @@ class PAQJPCompressor:
         prime_values = []
         count = 0
         while count < repeats:
-            current_value = find_nearest_prime_around(current_value)
+            current_value = find_nearest_prime_around(current_value) & 0xFF
             prime_values.append(current_value)
             count += 1
         xor_value = prime_values[-1] if prime_values else 0
@@ -850,11 +856,12 @@ class PAQJPCompressor:
         return None
 
     # ------------------------------------------------------------------
-    # Main compression / decompression
+    # Main compression / decompression (with integrity protection)
     # ------------------------------------------------------------------
     def compress_with_best(self, data: bytes) -> bytes:
         if not data:
-            return bytes([255, 255]) + self._compress_backend(b'')
+            header = bytes([255, 255]) + (0).to_bytes(8, 'little') + hashlib.sha256(b'').digest()
+            return header + self._compress_backend(b'')
 
         best_payload = None
         best_size = float('inf')
@@ -884,15 +891,22 @@ class PAQJPCompressor:
             except Exception:
                 continue
 
-        return bytes([best_markers[0], best_markers[1]]) + best_payload
+        # Build final header: 2 markers + 8 length + 32 SHA-256
+        header = bytes([best_markers[0], best_markers[1]])
+        header += len(data).to_bytes(8, 'little')
+        header += hashlib.sha256(data).digest()
+
+        return header + best_payload
 
     def decompress_with_best(self, data: bytes):
-        if len(data) < 3:
+        if len(data) < 42:   # 2 markers + 8 length + 32 hash
             return b'', None
 
         m1 = data[0]
         m2 = data[1]
-        payload = data[2:]
+        orig_len = int.from_bytes(data[2:10], 'little')
+        orig_hash = data[10:42]
+        payload = data[42:]
 
         backend = self._decompress_backend(payload)
         if backend is None:
@@ -908,6 +922,13 @@ class PAQJPCompressor:
             result = self._reverse_sequence(backend, seq)
         except Exception:
             return b'', None
+
+        # Verify integrity
+        if len(result) != orig_len:
+            return b'', None
+        if hashlib.sha256(result).digest() != orig_hash:
+            return b'', None
+
         return result, seq
 
     # ------------------------------------------------------------------
@@ -919,7 +940,7 @@ class PAQJPCompressor:
         print("=" * 60)
         all_ok = True
 
-        # Single transforms on every byte
+        # Single transforms on every byte (basic sanity)
         print("Testing all 256 single transforms on all 256 byte values...")
         for t_num in range(1, 257):
             for b in range(256):
@@ -945,7 +966,34 @@ class PAQJPCompressor:
             print("\n[FAIL] Single-transform test failed.")
             return False
 
-        # Pairs on every byte
+        # Test all transforms on random multi-byte blocks
+        print("Testing all transforms on random multi-byte blocks...")
+        rng = random.Random(987654)
+        for length in [0, 1, 2, 3, 7, 31, 100, 1000]:
+            for _ in range(10):
+                data = bytes(rng.randint(0, 255) for _ in range(length))
+                for t_num in range(1, 257):
+                    try:
+                        enc = self.fwd_transforms[t_num](data)
+                        dec = self.rev_transforms[t_num](enc)
+                        if dec != data:
+                            print(f"  FAIL: transform {t_num} on length {length}")
+                            all_ok = False
+                            break
+                    except Exception as e:
+                        print(f"  FAIL: transform {t_num} on length {length}: {e}")
+                        all_ok = False
+                        break
+                if not all_ok:
+                    break
+            if not all_ok:
+                break
+        if not all_ok:
+            print("\n[FAIL] Multi-byte single-transform test failed.")
+            return False
+        print("  PASS: all transforms OK on random multi-byte data")
+
+        # Pairs on every byte (basic sanity)
         print(f"\nTesting all {len(self.sequences)} transform pairs on all 256 byte values...")
         for idx, seq in enumerate(self.sequences):
             for b in range(256):
@@ -969,6 +1017,30 @@ class PAQJPCompressor:
             print("\n[FAIL] Pair test failed.")
             return False
         print("  PASS: all pairs OK on all bytes")
+
+        # Test pairs on random multi-byte blocks
+        print("Testing all pairs on random multi-byte blocks...")
+        for _ in range(50):
+            length = rng.randint(0, 500)
+            data = bytes(rng.randint(0, 255) for _ in range(length))
+            for seq in self.sequences:
+                try:
+                    enc = self._apply_sequence(data, seq)
+                    dec = self._reverse_sequence(enc, seq)
+                    if dec != data:
+                        print(f"  FAIL: pair {seq} on length {length}")
+                        all_ok = False
+                        break
+                except Exception as e:
+                    print(f"  FAIL: pair {seq} on length {length}: {e}")
+                    all_ok = False
+                    break
+            if not all_ok:
+                break
+        if not all_ok:
+            print("\n[FAIL] Multi-byte pair test failed.")
+            return False
+        print("  PASS: all pairs OK on random multi-byte data")
 
         # Random data + full pipeline test (quick sanity check)
         print("\nTesting random 1000‑byte block through full compress/decompress...")
@@ -1016,7 +1088,7 @@ class PAQJPCompressor:
 
         original, seq = self.decompress_with_best(data)
         if original == b'':
-            print("Decompression failed.")
+            print("Decompression failed (corrupted or invalid file).")
             return
 
         try:
