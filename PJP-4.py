@@ -213,6 +213,11 @@ PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p ** 
 PI_DIGITS = [79, 17, 111]
 BLOCK_SIZE = 1024
 
+# Safe list of single transforms – excludes all potentially non‑bijective or non‑byte‑exact transforms.
+# Excluded: 1 (RLE), 14 (non‑bijective), 22 (Base64 with validate=False), 23–27 (text tokenizers),
+#           31–32 (.docx transforms – lossy)
+SAFE_SINGLE_TRANSFORMS = [i for i in range(1, 257) if i not in (1, 14, 22, 23, 24, 25, 26, 27, 31, 32)]
+
 def find_nearest_prime_around(n: int) -> int:
     o = 0
     while True:
@@ -2122,8 +2127,8 @@ class PJPCompressor:
         best_total = float('inf')
         best_bytes = None
 
-        # Build list of single transforms (1..256) – exclude 28-30 if not allowed
-        single_transforms = list(range(1, 257))
+        # Build list of single transforms – use SAFE_SINGLE_TRANSFORMS (already excludes lossy ones)
+        single_transforms = SAFE_SINGLE_TRANSFORMS.copy()
         if not include_28:
             single_transforms = [t for t in single_transforms if t != 28]
         if not include_29:
@@ -2819,21 +2824,52 @@ class PJPCompressor:
             return
 
         candidates = []
-        if hybrid:
-            c_static = self._compress_static_dict(data)
-            if c_static is not None:
-                candidates.append(('Static-Word-Dict', c_static))
-            c_line = self._compress_line_dict(data)
-            if c_line is not None:
-                candidates.append(('Line-Dict', c_line))
-            c_dynamic = self._compress_dynamic_dict(data)
-            if c_dynamic is not None:
-                candidates.append(('Dynamic-Dict', c_dynamic))
 
+        # Helper to add a candidate only if it round‑trips losslessly
+        def add_candidate(name: str, compressed_bytes: bytes):
+            try:
+                if compressed_bytes.startswith(self.MAGIC_LINE):
+                    original = self._decompress_line_dict(compressed_bytes)
+                elif compressed_bytes.startswith(self.MAGIC_DICT + b'\x01'):
+                    original = self._decompress_static_dict(compressed_bytes)
+                elif compressed_bytes.startswith(self.MAGIC_DICT + b'\x02'):
+                    original = self._decompress_dynamic_dict(compressed_bytes)
+                else:
+                    original, _ = self._decompress_auto(compressed_bytes)
+                if original == data:
+                    candidates.append((name, compressed_bytes))
+            except Exception:
+                pass
+
+        # Main PJP candidate (already verified inside compress_with_best, but re‑verify)
         c_pjp = self.compress_with_best(data, safe=False, ultra=ultra,
                                         include_28=include_28, include_29=include_29,
                                         include_30=include_30)
-        candidates.append(('PJP', c_pjp))
+        add_candidate('PJP', c_pjp)
+
+        if hybrid:
+            c_static = self._compress_static_dict(data)
+            if c_static is not None:
+                add_candidate('Static-Word-Dict', c_static)
+            c_line = self._compress_line_dict(data)
+            if c_line is not None:
+                add_candidate('Line-Dict', c_line)
+            c_dynamic = self._compress_dynamic_dict(data)
+            if c_dynamic is not None:
+                add_candidate('Dynamic-Dict', c_dynamic)
+
+        if not candidates:
+            # Fallback to raw storage (always lossless)
+            raw_out = self._encode_marker_raw() + self._compress_backend(data, safe=True)
+            try:
+                orig, _ = self._decompress_auto(raw_out)
+                if orig == data:
+                    candidates.append(('Raw', raw_out))
+            except:
+                pass
+
+        if not candidates:
+            raise RuntimeError("No lossless compression candidate found – this should never happen.")
 
         best_method, best_bytes = min(candidates, key=lambda x: len(x[1]))
         try:
