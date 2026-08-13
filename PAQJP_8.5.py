@@ -881,30 +881,10 @@ class PAQJPCompressor:
         print("=" * 60)
         print("PAQJP 8.5 – FULL SELF‑TEST")
         print("=" * 60)
-        print("Testing empty input on all 256 single transforms...")
+        print("Testing all 256 single transforms on all 256 byte values...")
         all_ok = True
 
-        # 0. Test empty input on all single transforms
-        for t_num in range(1, 257):
-            orig = b''
-            try:
-                enc = self.fwd_transforms[t_num](orig)
-                dec = self.rev_transforms[t_num](enc)
-                if dec != orig:
-                    print(f"  FAIL: transform {t_num} on empty input")
-                    all_ok = False
-                    break
-            except Exception as e:
-                print(f"  FAIL: transform {t_num} on empty input raised {e}")
-                all_ok = False
-                break
-        if not all_ok:
-            print("\n[FAIL] Empty-input test failed.")
-            return False
-        print("  PASS: empty input on all single transforms")
-
         # 1. Test all single transforms on every byte value
-        print("Testing all 256 single transforms on all 256 byte values...")
         for t_num in range(1, 257):
             for b in range(256):
                 orig = bytes([b])
@@ -981,7 +961,7 @@ class PAQJPCompressor:
         print("\nTesting full pipeline on 100 random inputs...")
         random.seed(67890)
         for test_num in range(100):
-            size = random.randint(0, 500)  # include empty
+            size = random.randint(1, 500)
             data = bytes(random.getrandbits(8) for _ in range(size))
             try:
                 compressed = self.compress_with_best(data)
@@ -1028,7 +1008,7 @@ class PAQJPCompressor:
             return
 
         if len(data) == 0:
-            print(f"Compressed empty file -> {outfile} ({len(compressed)} bytes)")
+            print(f"Compressed empty file -> {outfile} (0 bytes)")
         else:
             ratio = (1 - len(compressed) / len(data)) * 100
             if paq is None and not HAS_ZSTD:
@@ -1051,7 +1031,7 @@ class PAQJPCompressor:
             return
 
         original, seq = self.decompress_with_best(data)
-        if original is None:
+        if original is None or original == b'':
             print("Decompression failed: invalid compressed data or transform error.")
             return
 

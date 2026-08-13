@@ -256,8 +256,6 @@ class PJPCompressor:
         self._build_transform_maps()
         self.sequences = self._build_pair_sequences()
         self.pair_lookup = {idx: (t1, t2) for idx, (t1, t2) in enumerate(self.sequences)}
-        # Fix: add reverse mapping
-        self.pair_to_idx = {pair: idx for idx, pair in self.pair_lookup.items()}
 
         self.static_dict, self.word_to_index = self._load_static_dictionary()
         self.line_dict, self.line_to_index = self._load_line_dictionary()
@@ -1689,7 +1687,7 @@ class PJPCompressor:
         return bytes([252])
 
     def _encode_marker_pair(self, t1: int, t2: int) -> bytes:
-        idx = self.pair_to_idx[(t1, t2)]
+        idx = (t1 - 1) * 52 + (t2 - 1)
         return bytes([253, (idx >> 8) & 0xFF, idx & 0xFF])
 
     def _decode_header(self, data: bytes):
@@ -1719,24 +1717,24 @@ class PJPCompressor:
             return 0, ()
 
     # ------------------------------------------------------------------
-    # Main compression with verification – 100% lossless guaranteed
+    # Main compression with auto‑correction – flags for 28, 29, 30
     # ------------------------------------------------------------------
     def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True,
                            include_28: bool = False, include_29: bool = False,
                            include_30: bool = False) -> bytes:
         if not data:
-            # Empty input: raw candidate is lossless
             backend = self._compress_backend(b'', safe)
             compressed = self._encode_marker_raw() + backend
-            # Verify (should always pass)
-            decomp, _ = self._decompress_auto(compressed)
-            if decomp == b'':
-                return compressed
-            # Fallback to raw without backend
-            return self._encode_marker_raw() + b'N'
+            if not safe:
+                decomp, _ = self._decompress_auto(compressed)
+                if decomp != b'':
+                    return self.compress_with_best(data, safe=True, ultra=ultra,
+                                                   include_28=include_28, include_29=include_29,
+                                                   include_30=include_30)
+            return compressed
 
+        best_total = float('inf')
         best_bytes = None
-        best_len = float('inf')
 
         # Build list of single transforms (1..256) – exclude 28-30 if not allowed
         single_transforms = list(range(1, 257))
@@ -1763,48 +1761,47 @@ class PJPCompressor:
         if not include_30:
             allowed_pairs = [seq for seq in allowed_pairs if 30 not in seq]
 
-        # Helper to verify a candidate before accepting it
-        def try_candidate(candidate_bytes):
-            nonlocal best_bytes, best_len
-            if len(candidate_bytes) >= best_len:
-                return
-            try:
-                dec, _ = self._decompress_auto(candidate_bytes)
-                if dec == data:
-                    best_bytes = candidate_bytes
-                    best_len = len(candidate_bytes)
-            except:
-                pass
-
-        # Raw candidate (always lossless)
+        # raw
         raw_backend = self._compress_backend(data, safe)
         candidate = self._encode_marker_raw() + raw_backend
-        try_candidate(candidate)
+        if len(candidate) < best_total:
+            best_total = len(candidate)
+            best_bytes = candidate
 
-        # Singles
+        # singles
         for t in single_transforms:
             try:
                 transformed = self.fwd_transforms[t](data)
                 backend = self._compress_backend(transformed, safe)
                 candidate = self._encode_marker_single(t) + backend
-                try_candidate(candidate)
+                if len(candidate) < best_total:
+                    best_total = len(candidate)
+                    best_bytes = candidate
             except:
                 continue
 
-        # Pairs – only if ultra mode is on
+        # pairs – only if ultra mode is on
         if ultra:
             for t1, t2 in allowed_pairs:
                 try:
                     transformed = self._apply_sequence(data, (t1, t2))
                     backend = self._compress_backend(transformed, safe)
                     candidate = self._encode_marker_pair(t1, t2) + backend
-                    try_candidate(candidate)
+                    if len(candidate) < best_total:
+                        best_total = len(candidate)
+                        best_bytes = candidate
                 except:
                     continue
 
-        if best_bytes is None:
-            # Should never happen because raw is always valid
-            raise RuntimeError("No lossless compression candidate found (internal error).")
+        decomp, _ = self._decompress_auto(best_bytes)
+        if decomp != data:
+            if not safe:
+                print("Note: marker‑free mode produced ambiguous stream, falling back to safe markers...")
+                return self.compress_with_best(data, safe=True, ultra=ultra,
+                                               include_28=include_28, include_29=include_29,
+                                               include_30=include_30)
+            else:
+                raise RuntimeError("Safe compression failed – unexpected internal error!")
         return best_bytes
 
     def _decompress_auto(self, data: bytes) -> Tuple[bytes, Optional[Tuple[int, ...]]]:
@@ -2375,7 +2372,7 @@ class PJPCompressor:
         return all_ok
 
     # ------------------------------------------------------------------
-    # File API – compression with full verification
+    # File API – compression (with hybrid mode) and decompression
     # ------------------------------------------------------------------
     def compress_file(self, infile: str, outfile: str, ultra: bool = True, hybrid: bool = False,
                       include_28: bool = False, include_29: bool = False,
@@ -2388,52 +2385,21 @@ class PJPCompressor:
             return
 
         candidates = []
-
-        # Helper to add a candidate only if it round‑trips losslessly
-        def add_candidate(name: str, compressed_bytes: bytes):
-            try:
-                if compressed_bytes.startswith(self.MAGIC_LINE):
-                    original = self._decompress_line_dict(compressed_bytes)
-                elif compressed_bytes.startswith(self.MAGIC_DICT + b'\x01'):
-                    original = self._decompress_static_dict(compressed_bytes)
-                elif compressed_bytes.startswith(self.MAGIC_DICT + b'\x02'):
-                    original = self._decompress_dynamic_dict(compressed_bytes)
-                else:
-                    original, _ = self._decompress_auto(compressed_bytes)
-                if original == data:
-                    candidates.append((name, compressed_bytes))
-            except Exception:
-                pass
-
-        # Main PJP candidate (already verified inside compress_with_best, but re‑verify)
-        c_pjp = self.compress_with_best(data, safe=False, ultra=ultra,
-                                        include_28=include_28, include_29=include_29,
-                                        include_30=include_30)
-        add_candidate('PJP', c_pjp)
-
         if hybrid:
             c_static = self._compress_static_dict(data)
             if c_static is not None:
-                add_candidate('Static-Word-Dict', c_static)
+                candidates.append(('Static-Word-Dict', c_static))
             c_line = self._compress_line_dict(data)
             if c_line is not None:
-                add_candidate('Line-Dict', c_line)
+                candidates.append(('Line-Dict', c_line))
             c_dynamic = self._compress_dynamic_dict(data)
             if c_dynamic is not None:
-                add_candidate('Dynamic-Dict', c_dynamic)
+                candidates.append(('Dynamic-Dict', c_dynamic))
 
-        if not candidates:
-            # Fallback to raw storage (always lossless)
-            raw_out = self._encode_marker_raw() + self._compress_backend(data, safe=True)
-            try:
-                orig, _ = self._decompress_auto(raw_out)
-                if orig == data:
-                    candidates.append(('Raw', raw_out))
-            except:
-                pass
-
-        if not candidates:
-            raise RuntimeError("No lossless compression candidate found – this should never happen.")
+        c_pjp = self.compress_with_best(data, safe=False, ultra=ultra,
+                                        include_28=include_28, include_29=include_29,
+                                        include_30=include_30)
+        candidates.append(('PJP', c_pjp))
 
         best_method, best_bytes = min(candidates, key=lambda x: len(x[1]))
         try:

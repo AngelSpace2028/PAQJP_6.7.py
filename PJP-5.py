@@ -1233,27 +1233,21 @@ class PJPCompressor:
         return self.transform_26(data)
 
     # ------------------------------------------------------------------
-    # Transform 27 – 6‑bit text compression (NOW UNAMBIGUOUS AND LOSSELESS)
+    # Transform 27 – 6‑bit text compression (text‑only, NOT bijective)
     # ------------------------------------------------------------------
     def transform_27(self, data: bytes) -> bytes:
-        """
-        Encode text using 6‑bit alphabet and pack into bytes.
-        Uses an explicit marker to distinguish transformed vs. raw.
-        Marker 0x00: raw data follows (no transform)
-        Marker 0x01: 6‑bit packed data follows
-        """
+        """Encode text using 6‑bit alphabet and pack into bytes.
+        If the input cannot be represented in the 6‑bit alphabet,
+        returns the original data unchanged (pass‑through)."""
         try:
             text = data.decode('utf-8')
         except UnicodeDecodeError:
-            # Not valid UTF-8 => return raw marker + original data
-            return b'\x00' + data
+            return data
 
-        # Check if all characters are in the 6‑bit alphabet
         for ch in text:
             if ch not in CHAR_TO_6BIT:
-                return b'\x00' + data   # raw, no transform
+                return data
 
-        # Perform 6‑bit packing
         bits = []
         for ch in text:
             val = CHAR_TO_6BIT[ch]
@@ -1270,26 +1264,16 @@ class PJPCompressor:
                 byte = (byte << 1) | bits[i + j]
             out.append(byte)
 
-        # Format: 0x01 + 4-byte length + packed data
         length_bytes = struct.pack('<I', len(text))
-        return b'\x01' + length_bytes + bytes(out)
+        return length_bytes + bytes(out)
 
     def reverse_transform_27(self, data: bytes) -> bytes:
-        """
-        Decode a 6‑bit stream or raw pass‑through.
-        """
-        if not data:
-            return b''
-        if data[0] == 0x00:
-            return data[1:]          # raw, just remove marker
-        if data[0] != 0x01:
-            # Unknown marker, cannot reverse -> return original (should not happen)
+        """Decode a 6‑bit packed stream. If the data is not a valid 6‑bit
+        stream, returns the original data unchanged."""
+        if len(data) < 4:
             return data
-
-        if len(data) < 5:
-            return data
-        num_chars = struct.unpack('<I', data[1:5])[0]
-        packed = data[5:]
+        num_chars = struct.unpack('<I', data[:4])[0]
+        packed = data[4:]
 
         # Check if packed length matches the expected length
         expected_packed_len = (num_chars * 6 + 7) // 8
@@ -2171,25 +2155,26 @@ class PJPCompressor:
 
     # ------------------------------------------------------------------
     # Main compression with auto‑correction – flags for 28, 29, 30
-    # MODIFIED: excluded non‑lossless single transforms, added final raw fallback
     # ------------------------------------------------------------------
     def compress_with_best(self, data: bytes, safe: bool = False, ultra: bool = True,
                            include_28: bool = False, include_29: bool = False,
                            include_30: bool = False) -> bytes:
-        # Final raw fallback (always lossless)
-        raw_safe = self._encode_marker_raw() + b'N' + data
-
         if not data:
-            # Empty input: just store raw with safe marker
-            return raw_safe
+            backend = self._compress_backend(b'', safe)
+            compressed = self._encode_marker_raw() + backend
+            if not safe:
+                decomp, _ = self._decompress_auto(compressed)
+                if decomp != b'':
+                    return self.compress_with_best(data, safe=True, ultra=ultra,
+                                                   include_28=include_28, include_29=include_29,
+                                                   include_30=include_30)
+            return compressed
 
-        # Build list of single transforms (lossless only)
-        # Exclude text tokenizers (23,24,25,26,27) and .docx (31,32)
-        # We still include 22 (Base64) because it is reversible and the
-        # marker mechanism ensures lossless round‑trip.
-        LOSSY_SINGLE_EXCLUDE = {23, 24, 25, 26, 27, 31, 32}
-        single_transforms = [t for t in range(1, 257) if t not in LOSSY_SINGLE_EXCLUDE]
+        best_total = float('inf')
+        best_bytes = None
 
+        # Build list of single transforms (1..256) – exclude 28-30 if not allowed
+        single_transforms = list(range(1, 257))
         if not include_28:
             single_transforms = [t for t in single_transforms if t != 28]
         if not include_29:
@@ -2212,9 +2197,6 @@ class PJPCompressor:
             allowed_pairs = [seq for seq in allowed_pairs if 29 not in seq]
         if not include_30:
             allowed_pairs = [seq for seq in allowed_pairs if 30 not in seq]
-
-        best_total = float('inf')
-        best_bytes = None
 
         # raw
         raw_backend = self._compress_backend(data, safe)
@@ -2248,21 +2230,18 @@ class PJPCompressor:
                 except:
                     continue
 
-        # Verify chosen candidate round‑trips
-        if best_bytes is not None:
-            decomp, _ = self._decompress_auto(best_bytes)
-            if decomp == data:
-                return best_bytes
-
-        # If marker‑free mode failed, retry in safe mode
-        if not safe:
-            #print("Note: marker‑free mode produced ambiguous stream, falling back to safe markers...")
-            return self.compress_with_best(data, safe=True, ultra=ultra,
-                                           include_28=include_28, include_29=include_29,
-                                           include_30=include_30)
-
-        # If even safe mode failed or no candidate, use raw fallback (guaranteed lossless)
-        return raw_safe
+        decomp, _ = self._decompress_auto(best_bytes)
+        if decomp != data:
+            if not safe:
+                print("Note: marker‑free mode produced ambiguous stream, falling back to safe markers...")
+                return self.compress_with_best(data, safe=True, ultra=ultra,
+                                               include_28=include_28, include_29=include_29,
+                                               include_30=include_30)
+            else:
+                # Provide more detail for debugging
+                raise RuntimeError(f"Safe compression failed – unexpected internal error! "
+                                   f"(input len={len(data)}, output len={len(best_bytes)})")
+        return best_bytes
 
     def _decompress_auto(self, data: bytes) -> Tuple[bytes, Optional[Tuple[int, ...]]]:
         offset, seq = self._decode_header(data)

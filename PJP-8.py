@@ -7,11 +7,11 @@ Unified PAQJP+PJP – All Transforms Combined (Lossless)
 - Time‑limited ultra mode (default 300s)
 - Final verification: compress, decompress, compare to original
 - If mismatch, fallback to raw+backend (guaranteed lossless)
-- SHA‑256 checksum appended to every compressed file
-- Decompression refuses to write if checksum fails
 - Quantum‑inspired transforms (optional, configurable qubits)
 - Exhaustive self‑test over all 65536 indices
+- Transform 57: 4‑byte XOR with most frequent pattern
 - Output naming: input.txt.pjp (or .pjp.lzh)
+- Optional backends: zstandard, paq, mpmath, cython, python-docx
 """
 
 import math
@@ -222,7 +222,7 @@ _CONST_DIAPASON_ITER_DECODE = {}
 for nibble, (length, bits) in enumerate(_CONST_DIAPASON_ITER_CODE):
     _CONST_DIAPASON_ITER_DECODE[(length, bits)] = nibble
 
-# ---------- 6‑bit alphabet ----------
+# ---------- 6‑bit alphabet (from PJP) ----------
 ALPHABET_6BIT = (
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     "abcdefghijklmnopqrstuvwxyz"
@@ -233,7 +233,7 @@ assert len(ALPHABET_6BIT) == 64
 CHAR_TO_6BIT = {ch: i for i, ch in enumerate(ALPHABET_6BIT)}
 SIXBIT_TO_CHAR = {i: ch for ch, i in CHAR_TO_6BIT.items()}
 
-# ---------- PAQ state table ----------
+# ---------- PAQ state table for transform 47 ----------
 PAQ_STATE_TABLE = [
     [  1,   2,   0,   0], [  3,   5,   0,   1], [  4,   6,   2,   0], [  7,  10,   0,   2],
     [  8,  12,   3,   0], [  9,  13,   1,   1], [ 11,  14,   0,   3], [ 15,  19,   4,   0],
@@ -273,7 +273,9 @@ PAQ_STATE_TABLE = [
 # Main Compressor Class – Unified
 # ------------------------------------------------------------------
 class UnifiedCompressor:
-    ULTRA_TIME_LIMIT = 300   # seconds
+    # Time limit for ultra compression (seconds). Set to None for no limit.
+    ULTRA_TIME_LIMIT = 300   # exactly as requested
+    # Quantum qubits – user can change this
     QUANTUM_QUBITS = 8       # default 8 (permutation size 256)
 
     def __init__(self):
@@ -299,6 +301,7 @@ class UnifiedCompressor:
         self.static_dict, self.word_to_index = self._load_static_dictionary()
         self.line_dict, self.line_to_index = self._load_line_dictionary()
 
+        # Quantum transforms will be built later (if enabled)
         self.quantum_transforms_built = False
         if USE_QUANTUM and HAS_QISKIT:
             self._precompute_quantum_transforms()
@@ -313,8 +316,9 @@ class UnifiedCompressor:
         if q < 1 or q > 49:
             print("Qubit count must be between 1 and 49.")
             return
+        # Check size
         size = 1 << q
-        if size > 1_000_000:
+        if size > 1_000_000:  # safety limit
             print(f"WARNING: {q} qubits → {size} entries. This will consume > {size*8/1e6:.1f} MB memory.")
             confirm = input("Proceed anyway? (y/n): ").strip().lower()
             if confirm != 'y':
@@ -332,7 +336,7 @@ class UnifiedCompressor:
         return 0
 
     # ------------------------------------------------------------------
-    # Mask 46
+    # Mask 46 (from PAQJP)
     # ------------------------------------------------------------------
     def _build_mask_46(self):
         base = [1, 2, 4, 8, 16, 32, 64, 128, 3, 6]
@@ -868,7 +872,7 @@ class UnifiedCompressor:
         except:
             return data
 
-    # 23 – SHA‑256 word tokenizer
+    # 23 – SHA‑256 word tokenizer (PJP's 23)
     def transform_23(self, data: bytes) -> bytes:
         if not data: return b'\x00\x00\x00\x00'
         try:
@@ -948,7 +952,7 @@ class UnifiedCompressor:
                 break
         return bytes(out)
 
-    # 24 – XOR‑prime word tokenizer
+    # 24 – XOR‑prime word tokenizer (PJP's 24)
     def transform_24(self, data: bytes) -> bytes:
         if not data: return b'\x00\x00\x00\x00'
         try:
@@ -1028,7 +1032,7 @@ class UnifiedCompressor:
                 break
         return bytes(out)
 
-    # 25 – Dynamic dictionary tokenizer
+    # 25 – Dynamic dictionary tokenizer (PJP's 25)
     def _split_text_into_chunks(self, text: str, level: str = 'all') -> List[str]:
         if level == 'paragraph':
             return re.split(r'(\n\n)', text)
@@ -1133,17 +1137,12 @@ class UnifiedCompressor:
             return None
 
     def transform_25(self, data: bytes) -> bytes:
-        if not data:
-            return b'\x00'
-        try:
-            return self._dynamic_dict_tokenize(data, index_bytes=3)
-        except Exception:
-            return b'\x00' + data
+        return self._dynamic_dict_tokenize(data, index_bytes=3)
     def reverse_transform_25(self, data: bytes) -> bytes:
         result = self._dynamic_dict_detokenize(data)
         return result if result is not None else b''
 
-    # 26 – SHA‑256 block masking
+    # 26 – SHA‑256 block masking (PJP's 26)
     def transform_26(self, data: bytes) -> bytes:
         if not data: return b''
         secret = b"PJP_TRANSFORM26_SECRET"
@@ -1162,15 +1161,17 @@ class UnifiedCompressor:
     def reverse_transform_26(self, data: bytes) -> bytes:
         return self.transform_26(data)
 
-    # 27 – 6‑bit text compression
+    # 27 – 6‑bit text compression (PJP's 27) – FIXED for unambiguous pass‑through
     def transform_27(self, data: bytes) -> bytes:
+        """6‑bit text compression. Prefixes with \x01 if encoded, \x00 if raw."""
         try:
             text = data.decode('utf-8')
         except UnicodeDecodeError:
-            return b'\x00' + data
+            return b'\x00' + data   # not text → store raw
         for ch in text:
             if ch not in CHAR_TO_6BIT:
-                return b'\x00' + data
+                return b'\x00' + data   # contains unsupported characters → raw
+        # All characters are in the 64‑char alphabet → 6‑bit encode
         bits = []
         for ch in text:
             val = CHAR_TO_6BIT[ch]
@@ -1188,27 +1189,32 @@ class UnifiedCompressor:
         return b'\x01' + length_bytes + bytes(out)
 
     def reverse_transform_27(self, data: bytes) -> bytes:
+        """Decompress 6‑bit text. Expects 1‑byte flag + payload."""
         if len(data) < 1:
             return b''
         flag = data[0]
         if flag == 0:
+            # Raw pass‑through
             return data[1:]
         if flag != 1:
+            # Unknown flag – treat as raw to be safe (fallback)
             return data
         payload = data[1:]
         if len(payload) < 4:
-            return data
+            return data  # too short
         num_chars = struct.unpack('<I', payload[:4])[0]
         packed = payload[4:]
         needed_bytes = (num_chars * 6 + 7) // 8
         if len(packed) != needed_bytes:
-            return data
+            return data  # length mismatch → something is wrong
+        # Check padding bits
         pad_bits = (8 - (num_chars * 6) % 8) % 8
         if pad_bits > 0 and packed:
             last_byte = packed[-1]
             mask = (1 << pad_bits) - 1
             if (last_byte & mask) != 0:
-                return data
+                return data  # invalid padding → pass through original
+        # Decode bits
         bits = []
         for b in packed:
             for i in range(7, -1, -1):
@@ -1230,7 +1236,7 @@ class UnifiedCompressor:
             return data
 
     # ------------------------------------------------------------------
-    # Transforms 28‑30
+    # Transforms 28‑30: PJP's subtract variants
     # ------------------------------------------------------------------
     def transform_28(self, data: bytes) -> bytes:
         if not data: return b''
@@ -1400,7 +1406,7 @@ class UnifiedCompressor:
         return bytes(out)
 
     # ------------------------------------------------------------------
-    # Transforms 31‑32 (identity)
+    # Transforms 31‑32: docx identity (from PJP)
     # ------------------------------------------------------------------
     def transform_31(self, data: bytes) -> bytes:
         return data
@@ -1608,6 +1614,7 @@ class UnifiedCompressor:
             res[i] = (pow(res[i] + 1, inv_e, 257) - 1) & 0xFF
         return bytes(res)
 
+    # FLT blockwise 27-30 (PAQJP 27-30 -> our 37-40)
     def _paqjp_transform_27(self, data: bytes) -> bytes:
         if not data:
             out = bytearray(b'\x00\x00\x00\x00')
@@ -1827,7 +1834,7 @@ class UnifiedCompressor:
             decoded.extend(block)
         return bytes(decoded[:orig_len])
 
-    # PAQJP special 41-47
+    # PAQJP special 41-47 -> our 41-47 (same numbers)
     def transform_41(self, data: bytes) -> bytes:
         if not data: return b''
         mask = bytes([0x27, 0x03])
@@ -1866,6 +1873,56 @@ class UnifiedCompressor:
             return base64.b64decode(data, validate=False)
         except:
             return data
+
+    # 45 Huffman (from PAQJP)
+    @staticmethod
+    def _huffman_code_lengths(freq: List[int]) -> List[int]:
+        heap = [(f, i, i) for i, f in enumerate(freq) if f > 0]
+        if not heap: return [0] * len(freq)
+        if len(heap) == 1:
+            lengths = [0] * len(freq)
+            lengths[heap[0][2]] = 1
+            return lengths
+        heapq.heapify(heap)
+        # FIX: Use len(freq) instead of len(heap) to avoid counter collisions
+        next_id = len(freq)
+        while len(heap) > 1:
+            f1, _, n1 = heapq.heappop(heap)
+            f2, _, n2 = heapq.heappop(heap)
+            heapq.heappush(heap, (f1 + f2, next_id, (n1, n2)))
+            next_id += 1
+        lengths = [0] * len(freq)
+        def traverse(node, depth):
+            if isinstance(node, int):
+                lengths[node] = depth
+            else:
+                left, right = node
+                traverse(left, depth + 1)
+                traverse(right, depth + 1)
+        _, _, root = heap[0]
+        traverse(root, 0)
+        return lengths
+
+    @staticmethod
+    def _huffman_canonical_codes(code_lengths: List[int]) -> Dict[int, Tuple[int, int]]:
+        symbols = list(range(len(code_lengths)))
+        symbols.sort(key=lambda s: (code_lengths[s], s))
+        codes = {}
+        code = 0
+        prev_len = 0
+        first = True
+        for sym in symbols:
+            cl = code_lengths[sym]
+            if cl == 0: continue
+            if first:
+                prev_len = cl
+                first = False
+            elif cl != prev_len:
+                code <<= (cl - prev_len)
+                prev_len = cl
+            codes[sym] = (code, cl)
+            code += 1
+        return codes
 
     def transform_45(self, data: bytes) -> bytes:
         if not data: return b''
@@ -1938,6 +1995,7 @@ class UnifiedCompressor:
             if not found: break
         return bytes(out)
 
+    # 46 power-of-2 mask
     def transform_46(self, data: bytes) -> bytes:
         if not data: return b''
         t = bytearray(data)
@@ -1947,6 +2005,7 @@ class UnifiedCompressor:
         return bytes(t)
     reverse_transform_46 = transform_46
 
+    # 47 PAQ state table XOR
     def transform_47(self, data: bytes) -> bytes:
         if not data: return b''
         t = bytearray(data)
@@ -1959,26 +2018,36 @@ class UnifiedCompressor:
     reverse_transform_47 = transform_47
 
     # ------------------------------------------------------------------
-    # NEW TRANSFORM 57 – 4‑byte XOR with most frequent pattern
+    # NEW TRANSFORM 57 – 4‑byte XOR with most frequent pattern (adds zeros)
     # ------------------------------------------------------------------
     def transform_57(self, data: bytes) -> bytes:
+        """
+        Finds the most frequent 4‑byte integer in the data, XORs every
+        4‑byte block with that key, and stores the key (4 bytes) in the header.
+        This makes the most common pattern become 0x00000000, increasing zero bytes.
+        """
         if len(data) < 4:
             pad_len = 4 - len(data)
-            key = 0
+            key = 0  # no frequent pattern
             header = bytes([pad_len]) + key.to_bytes(4, 'little')
             padded = data + b'\x00' * pad_len
+            # XOR with key (which is 0) – no change
             return header + padded
+        # Count 4‑byte blocks (little‑endian)
         n = len(data)
         pad_len = (4 - n % 4) % 4
         padded = data + b'\x00' * pad_len
         blocks = [padded[i:i+4] for i in range(0, len(padded), 4)]
+        # Find most common block
         counter = Counter(blocks)
         most_common_block, _ = counter.most_common(1)[0]
         key = int.from_bytes(most_common_block, 'little')
+        # Apply XOR to each block
         transformed = bytearray()
         for block in blocks:
             val = int.from_bytes(block, 'little') ^ key
             transformed.extend(val.to_bytes(4, 'little'))
+        # Header: pad_len (1 byte) + key (4 bytes)
         header = bytes([pad_len]) + key.to_bytes(4, 'little')
         return header + bytes(transformed)
 
@@ -1999,7 +2068,7 @@ class UnifiedCompressor:
             transformed = transformed[:-pad_len]
         return bytes(transformed)
 
-    # Dynamic 48-255 (XOR with seed) – skip 57
+    # Dynamic 48-255 (XOR with seed) – skip 57 because we used it
     def _dynamic_transform(self, n: int):
         def tf(data: bytes):
             if not data: return b''
@@ -2030,37 +2099,53 @@ class UnifiedCompressor:
         return None
 
     # ------------------------------------------------------------------
-    # Build transform maps
+    # Build transform maps (final)
     # ------------------------------------------------------------------
     def _build_transform_maps(self):
         self.fwd_transforms: Dict[int, Callable] = {}
         self.rev_transforms: Dict[int, Callable] = {}
 
+        # 1-21
         for i in range(1, 22):
             fwd_name = f"transform_{i:02d}"
             rev_name = f"reverse_transform_{i:02d}"
             self.fwd_transforms[i] = getattr(self, fwd_name)
             self.rev_transforms[i] = getattr(self, rev_name)
 
+        # 22-27 PJP
         self.fwd_transforms[22] = self.transform_22; self.rev_transforms[22] = self.reverse_transform_22
         self.fwd_transforms[23] = self.transform_23; self.rev_transforms[23] = self.reverse_transform_23
         self.fwd_transforms[24] = self.transform_24; self.rev_transforms[24] = self.reverse_transform_24
         self.fwd_transforms[25] = self.transform_25; self.rev_transforms[25] = self.reverse_transform_25
         self.fwd_transforms[26] = self.transform_26; self.rev_transforms[26] = self.reverse_transform_26
         self.fwd_transforms[27] = self.transform_27; self.rev_transforms[27] = self.reverse_transform_27
+
+        # 28-30 PJP
         self.fwd_transforms[28] = self.transform_28; self.rev_transforms[28] = self.reverse_transform_28
         self.fwd_transforms[29] = self.transform_29; self.rev_transforms[29] = self.reverse_transform_29
         self.fwd_transforms[30] = self.transform_30; self.rev_transforms[30] = self.reverse_transform_30
+
+        # 31-32 identity
         self.fwd_transforms[31] = self.transform_31; self.rev_transforms[31] = self.reverse_transform_31
         self.fwd_transforms[32] = self.transform_32; self.rev_transforms[32] = self.reverse_transform_32
-        self.fwd_transforms[33] = self._paqjp_transform_23; self.rev_transforms[33] = self._paqjp_reverse_23
-        self.fwd_transforms[34] = self._paqjp_transform_24; self.rev_transforms[34] = self._paqjp_reverse_24
+
+        # 33 = PAQJP 23 (Constant Diapason)
+        self.fwd_transforms[33] = self._paqjp_transform_23
+        self.rev_transforms[33] = self._paqjp_reverse_23
+
+        # 34 = PAQJP 24 (block run)
+        self.fwd_transforms[34] = self._paqjp_transform_24
+        self.rev_transforms[34] = self._paqjp_reverse_24
+
+        # 35-40 = PAQJP 25-30
         self.fwd_transforms[35] = self._paqjp_transform_25; self.rev_transforms[35] = self._paqjp_reverse_25
         self.fwd_transforms[36] = self._paqjp_transform_26; self.rev_transforms[36] = self._paqjp_reverse_26
         self.fwd_transforms[37] = self._paqjp_transform_27; self.rev_transforms[37] = self._paqjp_reverse_27
         self.fwd_transforms[38] = self._paqjp_transform_28; self.rev_transforms[38] = self._paqjp_reverse_28
         self.fwd_transforms[39] = self._paqjp_transform_29; self.rev_transforms[39] = self._paqjp_reverse_29
         self.fwd_transforms[40] = self._paqjp_transform_30; self.rev_transforms[40] = self._paqjp_reverse_30
+
+        # 41-47 special
         self.fwd_transforms[41] = self.transform_41; self.rev_transforms[41] = self.reverse_transform_41
         self.fwd_transforms[42] = self.transform_42; self.rev_transforms[42] = self.reverse_transform_42
         self.fwd_transforms[43] = self.transform_43; self.rev_transforms[43] = self.reverse_transform_43
@@ -2069,24 +2154,28 @@ class UnifiedCompressor:
         self.fwd_transforms[46] = self.transform_46; self.rev_transforms[46] = self.reverse_transform_46
         self.fwd_transforms[47] = self.transform_47; self.rev_transforms[47] = self.reverse_transform_47
 
+        # 48-56 dynamic (we skip 57)
         for i in range(48, 57):
             fwd, rev = self._dynamic_transform(i)
             self.fwd_transforms[i] = fwd
             self.rev_transforms[i] = rev
 
+        # 57 – new 4‑byte pattern XOR
         self.fwd_transforms[57] = self.transform_57
         self.rev_transforms[57] = self.reverse_transform_57
 
+        # 58-255 dynamic
         for i in range(58, 256):
             fwd, rev = self._dynamic_transform(i)
             self.fwd_transforms[i] = fwd
             self.rev_transforms[i] = rev
 
+        # 256 identity
         self.fwd_transforms[256] = self.transform_256
         self.rev_transforms[256] = self.reverse_transform_256
 
     # ------------------------------------------------------------------
-    # Pair sequences – 65535
+    # Pair sequences – 65535 (256x256 minus identity)
     # ------------------------------------------------------------------
     def _build_pair_sequences(self) -> List[Tuple[int, int]]:
         pairs = []
@@ -2098,7 +2187,7 @@ class UnifiedCompressor:
         return pairs
 
     # ------------------------------------------------------------------
-    # Dictionary loaders
+    # Dictionary loaders (from PJP)
     # ------------------------------------------------------------------
     def _load_static_dictionary(self):
         if not os.path.exists(COMBINED_DICTIONARY_FILE):
@@ -2140,15 +2229,18 @@ class UnifiedCompressor:
         return lines, line_to_idx
 
     # ------------------------------------------------------------------
-    # Quantum transforms
+    # Quantum transforms (optional) – now with configurable qubits
     # ------------------------------------------------------------------
     def _generate_permutation_from_circuit(self, num_qubits: int, seed: int) -> List[int]:
+        """Generate a permutation of size 2^num_qubits using a quantum circuit."""
         if not USE_QUANTUM or not HAS_QISKIT:
+            # Fallback: deterministic shuffle based on seed
             rng = random.Random(seed)
             size = 1 << num_qubits
             perm = list(range(size))
             rng.shuffle(perm)
             return perm
+
         try:
             qc = QuantumCircuit(num_qubits)
             rng = random.Random(seed)
@@ -2174,6 +2266,7 @@ class UnifiedCompressor:
             rng2.shuffle(perm)
             return perm
         except Exception:
+            # Fallback
             rng = random.Random(seed)
             size = 1 << num_qubits
             perm = list(range(size))
@@ -2183,34 +2276,62 @@ class UnifiedCompressor:
     def _precompute_quantum_transforms(self):
         if not USE_QUANTUM or not HAS_QISKIT:
             return
+
         q = self.QUANTUM_QUBITS
+        # Sanity check: limit to 49 qubits, but also memory.
         if q > 49:
+            print(f"WARNING: {q} qubits exceeds practical limit. Clamping to 49.")
             q = 49
             self.QUANTUM_QUBITS = q
+
         size = 1 << q
+        # If size is huge, we generate fewer transforms, or fall back to smaller block size.
+        # Here we generate a few permutations (say, 8) and use them.
+        # But we also want to allow large q for variation count, but not for full permutation.
+        # So we'll generate a single permutation of size = min(size, 2704) for practical use.
+        # The actual variation count is displayed, but we only use a reasonable block size.
+        # For q > 16, we use a smaller block size (say 1024) but the number of qubits is still used for seeding.
+        # We'll generate permutations for block sizes:
+        # - If q <= 12: block_size = 2^q
+        # - else: block_size = 1024 (2^10) and we use q only for seeding.
         if q <= 12:
             block_size = size
         else:
-            block_size = 1024
+            block_size = 1024  # fallback to avoid memory blow
             print(f"NOTE: Using block size {block_size} for permutations (qubits {q} used for seeding only).")
-        num_perms = 8
+
+        # Generate a set of transforms
+        num_perms = 8  # number of quantum transforms to add
         self.quantum_fast_transforms = []
+        self.quantum_ultra_transforms = []
         for i in range(num_perms):
             seed = 1000 + i
             perm = self._generate_permutation_from_circuit(q, seed)
+            # Trim perm to block_size
             if len(perm) > block_size:
                 perm = perm[:block_size]
+            # Ensure it's a permutation over the block_size
+            # If not, we can just reorder the first block_size elements
+            # But we generated a full permutation; we'll take the first block_size and then map.
+            # We'll create a substitution for each byte (or for each 16-bit value?)
+            # We'll make it a substitution over block_size bytes.
             fwd, rev = self._make_substitution_transform(perm, block_size)
             self.quantum_fast_transforms.append((fwd, rev))
+            # Also a block permutation for larger blocks? But we'll keep simple.
+
+        # Now add them to the transform maps (after 256)
         base = 256
         for idx, (fwd, rev) in enumerate(self.quantum_fast_transforms, start=1):
             self.fwd_transforms[base + idx] = fwd
             self.rev_transforms[base + idx] = rev
+
         self.quantum_transforms_built = True
         print(f"Quantum transforms built: {num_perms} transforms with block size {block_size} using {q} qubits.")
 
     def _make_substitution_transform(self, perm: List[int], size: int):
+        """Create forward and reverse substitution transforms for bytes."""
         if size < 256:
+            # If size < 256, we only map values < size, others pass through.
             inv_perm = [0] * size
             for i, p in enumerate(perm):
                 inv_perm[p] = i
@@ -2231,6 +2352,7 @@ class UnifiedCompressor:
                         out.append(b)
                 return bytes(out)
         else:
+            # size >= 256: full substitution for all bytes
             inv_perm = [0] * size
             for i, p in enumerate(perm):
                 inv_perm[p] = i
@@ -2255,7 +2377,7 @@ class UnifiedCompressor:
         return max(1, min(256, repeats))
 
     # ------------------------------------------------------------------
-    # LZ77 + Huffman pipeline
+    # LZ77 + Huffman pipeline (from PAQJP)
     # ------------------------------------------------------------------
     WINDOW_SIZE = 2048
     MIN_MATCH = 3
@@ -2528,9 +2650,12 @@ class UnifiedCompressor:
     # ------------------------------------------------------------------
     def compress_with_verification(self, data: bytes, ultra: bool = True,
                                    time_limit: Optional[float] = None) -> bytes:
+        """Compress with final verification. If best candidate fails, fallback to raw+backend."""
         if time_limit is None:
             time_limit = self.ULTRA_TIME_LIMIT
         start_time = time.time()
+
+        # Try to get a compressed candidate
         best_candidate = None
         best_len = float('inf')
 
@@ -2541,11 +2666,68 @@ class UnifiedCompressor:
                 best_candidate = candidate
                 best_len = len(candidate)
 
+        # Raw
         try_candidate(self._encode_marker_raw(), data)
-        max_single = 256
-        if USE_QUANTUM and HAS_QISKIT:
-            max_single = 256 + 8
-        for t in range(1, max_single + 1):
+
+        # Single transforms
+        for t in range(1, 257):
+            if time_limit and time.time() - start_time > time_limit:
+                break
+            try:
+                transformed = self.fwd_transforms[t](data)
+                try_candidate(self._encode_marker_single(t), transformed)
+            except:
+                continue
+
+        if ultra:
+            for t1, t2 in self.sequences:
+                if time_limit and time.time() - start_time > time_limit:
+                    break
+                try:
+                    transformed = self.fwd_transforms[t1](data)
+                    transformed = self.fwd_transforms[t2](transformed)
+                    try_candidate(self._encode_marker_pair(t1, t2), transformed)
+                except:
+                    continue
+
+        # If no candidate (shouldn't happen), use raw+backend
+        if best_candidate is None:
+            best_candidate = self._encode_marker_raw() + self._compress_backend(data)
+
+        # VERIFY: decompress and compare
+        decomp, _ = self._decompress_auto(best_candidate)
+        if decomp == data:
+            return best_candidate
+
+        # Fallback: raw+backend (guaranteed lossless)
+        fallback = self._encode_marker_raw() + self._compress_backend(data)
+        decomp_fb, _ = self._decompress_auto(fallback)
+        if decomp_fb != data:
+            raise RuntimeError("Fallback compression also failed – this should never happen.")
+        return fallback
+
+    def compress_with_lzh(self, data: bytes, ultra: bool = True,
+                          time_limit: Optional[float] = None) -> bytes:
+        """LZH pipeline with final verification."""
+        if time_limit is None:
+            time_limit = self.ULTRA_TIME_LIMIT
+        start_time = time.time()
+        best_candidate = None
+        best_len = float('inf')
+
+        def try_candidate(header: bytes, transformed: bytes):
+            nonlocal best_candidate, best_len
+            lzh = self._encode_lzh(transformed)
+            candidate = header + b'\xFF' + lzh
+            if len(candidate) < best_len:
+                best_candidate = candidate
+                best_len = len(candidate)
+
+        # Raw
+        try_candidate(self._encode_marker_raw(), data)
+
+        # Single transforms
+        for t in range(1, 257):
             if time_limit and time.time() - start_time > time_limit:
                 break
             try:
@@ -2566,72 +2748,24 @@ class UnifiedCompressor:
                     continue
 
         if best_candidate is None:
-            best_candidate = self._encode_marker_raw() + self._compress_backend(data)
-
-        try:
-            decomp, _ = self._decompress_auto(best_candidate)
+            fallback = self._encode_marker_raw() + self._compress_backend(data)
+            # Verify fallback
+            decomp = self._decompress_lzh_pipeline(fallback)
             if decomp != data:
-                best_candidate = self._encode_marker_raw() + self._compress_backend(data)
-                decomp, _ = self._decompress_auto(best_candidate)
-                if decomp != data:
-                    raise RuntimeError("Fallback compression also failed – this should never happen.")
-        except Exception as e:
-            raise RuntimeError(f"Verification failed: {e}")
+                raise RuntimeError("Fallback LZH compression failed.")
+            return fallback
 
-        original_hash = hashlib.sha256(data).digest()
-        return best_candidate + original_hash
+        # Verify best candidate
+        decomp = self._decompress_lzh_pipeline(best_candidate)
+        if decomp == data:
+            return best_candidate
 
-    def compress_with_lzh(self, data: bytes, ultra: bool = True,
-                          time_limit: Optional[float] = None) -> bytes:
-        if time_limit is None:
-            time_limit = self.ULTRA_TIME_LIMIT
-        start_time = time.time()
-        best_candidate = None
-        best_len = float('inf')
-
-        def try_candidate(header: bytes, transformed: bytes):
-            nonlocal best_candidate, best_len
-            lzh = self._encode_lzh(transformed)
-            candidate = header + b'\xFF' + lzh
-            if len(candidate) < best_len:
-                best_candidate = candidate
-                best_len = len(candidate)
-
-        try_candidate(self._encode_marker_raw(), data)
-        max_single = 256
-        if USE_QUANTUM and HAS_QISKIT:
-            max_single = 256 + 8
-        for t in range(1, max_single + 1):
-            if time_limit and time.time() - start_time > time_limit: break
-            try:
-                transformed = self.fwd_transforms[t](data)
-                try_candidate(self._encode_marker_single(t), transformed)
-            except: continue
-
-        if ultra:
-            for t1, t2 in self.sequences:
-                if time_limit and time.time() - start_time > time_limit: break
-                try:
-                    transformed = self.fwd_transforms[t1](data)
-                    transformed = self.fwd_transforms[t2](transformed)
-                    try_candidate(self._encode_marker_pair(t1, t2), transformed)
-                except: continue
-
-        if best_candidate is None:
-            best_candidate = self._encode_marker_raw() + self._compress_backend(data)
-
-        try:
-            decomp = self._decompress_lzh_pipeline(best_candidate)
-            if decomp != data:
-                best_candidate = self._encode_marker_raw() + self._compress_backend(data)
-                decomp = self._decompress_lzh_pipeline(best_candidate)
-                if decomp != data:
-                    raise RuntimeError("Fallback compression failed.")
-        except Exception as e:
-            raise RuntimeError(f"Verification failed: {e}")
-
-        original_hash = hashlib.sha256(data).digest()
-        return best_candidate + original_hash
+        # Fallback
+        fallback = self._encode_marker_raw() + self._compress_backend(data)
+        decomp = self._decompress_lzh_pipeline(fallback)
+        if decomp != data:
+            raise RuntimeError("Fallback compression failed.")
+        return fallback
 
     def _decompress_lzh_pipeline(self, data: bytes) -> Optional[bytes]:
         offset, seq = self._decode_header(data)
@@ -2666,7 +2800,7 @@ class UnifiedCompressor:
         return result
 
     # ------------------------------------------------------------------
-    # File I/O
+    # File I/O with simple naming
     # ------------------------------------------------------------------
     def _auto_output_name(self, infile: str, suffix: str = ".pjp") -> str:
         base = os.path.basename(infile)
@@ -2686,9 +2820,11 @@ class UnifiedCompressor:
     def compress_file(self, infile: str, outfile: str = "", ultra: bool = True,
                       use_lzh: bool = False, time_limit: Optional[float] = None):
         try:
-            with open(infile, 'rb') as f: data = f.read()
+            with open(infile, 'rb') as f:
+                data = f.read()
         except Exception as e:
-            print(f"Error reading file: {e}"); return
+            print(f"Error reading file: {e}")
+            return
         try:
             if use_lzh:
                 compressed = self.compress_with_lzh(data, ultra=ultra, time_limit=time_limit)
@@ -2697,13 +2833,15 @@ class UnifiedCompressor:
                 compressed = self.compress_with_verification(data, ultra=ultra, time_limit=time_limit)
                 default_suffix = ".pjp"
         except RuntimeError as e:
-            print(f"Compression failed: {e}"); return
+            print(f"Compression failed: {e}")
+            return
         if not outfile:
             outfile = self._auto_output_name(infile, default_suffix)
         try:
             self._atomic_write(outfile, compressed)
         except Exception as e:
-            print(f"Error writing output file: {e}"); return
+            print(f"Error writing output file: {e}")
+            return
         print(f"Compressed {len(data)} → {len(compressed)} bytes → {outfile}")
 
     def decompress_file(self, infile: str, outfile: str = ""):
@@ -2711,43 +2849,31 @@ class UnifiedCompressor:
             with open(infile, 'rb') as f:
                 data = f.read()
         except Exception as e:
-            print(f"Error reading file: {e}"); return
-
-        if len(data) < 32:
-            print("Invalid file: too short to contain a checksum."); return
-
-        stored_hash = data[-32:]
-        compressed_data = data[:-32]
-
-        if compressed_data.startswith(b'DICT'):
-            if compressed_data.startswith(b'DICT\x01'):
-                original = self._decompress_static_dict(compressed_data)
-            elif compressed_data.startswith(b'DICT\x02'):
-                original = self._decompress_dynamic_dict(compressed_data)
-            else:
-                print("Unknown dictionary format"); return
-        elif compressed_data.startswith(b'LINE'):
-            original = self._decompress_line_dict(compressed_data)
-        else:
-            try:
-                offset, seq = self._decode_header(compressed_data)
-                if offset == 0:
-                    print("Decompression failed: invalid header."); return
-                if offset < len(compressed_data) and compressed_data[offset] == 0xFF:
-                    original = self._decompress_lzh_pipeline(compressed_data)
-                else:
-                    original, _ = self._decompress_auto(compressed_data)
-            except Exception as e:
-                print(f"Decompression error: {e}"); return
-
-        if original is None:
-            print("Decompression failed."); return
-
-        computed_hash = hashlib.sha256(original).digest()
-        if computed_hash != stored_hash:
-            print("ERROR: checksum mismatch – file may be corrupted.")
+            print(f"Error reading file: {e}")
             return
-
+        # Check for dictionary formats (not used, but we handle gracefully)
+        if data.startswith(b'DICT'):
+            if data.startswith(b'DICT\x01'):
+                original = self._decompress_static_dict(data)
+            elif data.startswith(b'DICT\x02'):
+                original = self._decompress_dynamic_dict(data)
+            else:
+                print("Unknown dictionary format")
+                return
+        elif data.startswith(b'LINE'):
+            original = self._decompress_line_dict(data)
+        else:
+            offset, seq = self._decode_header(data)
+            if offset == 0:
+                print("Decompression failed: invalid header.")
+                return
+            if offset < len(data) and data[offset] == 0xFF:
+                original = self._decompress_lzh_pipeline(data)
+            else:
+                original, _ = self._decompress_auto(data)
+        if original is None:
+            print("Decompression failed.")
+            return
         if not outfile:
             base = os.path.basename(infile)
             name_without_suffix = re.sub(r'\.pjp(\.lzh)?$', '', base)
@@ -2755,11 +2881,12 @@ class UnifiedCompressor:
         try:
             self._atomic_write(outfile, original)
         except Exception as e:
-            print(f"Error writing output file: {e}"); return
+            print(f"Error writing output file: {e}")
+            return
         print(f"Decompressed → {outfile} ({len(original)} bytes)")
 
     # ------------------------------------------------------------------
-    # Full self‑test
+    # Full self‑test (can be skipped – it's exhaustive but slow)
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
@@ -2793,7 +2920,7 @@ class UnifiedCompressor:
         test_data = bytes(rng.randint(0, 255) for _ in range(1000))
         try:
             compressed = self.compress_with_lzh(test_data, ultra=True, time_limit=30)
-            decompressed = self._decompress_lzh_pipeline(compressed[:-32])
+            decompressed = self._decompress_lzh_pipeline(compressed)
             if decompressed != test_data:
                 print("  FAIL: LZH pipeline mismatch")
                 return False
@@ -2831,17 +2958,19 @@ class UnifiedCompressor:
 def main():
     print(f"{PROGNAME} – Unified compression with all transforms from PAQJP and PJP")
     print("Compressed output: input.txt.pjp (or input.txt.pjp.lzh)\n")
+    print("Ultra modes are time‑limited to 300 seconds (adjustable in code).")
     c = UnifiedCompressor()
 
     while True:
         print("\nMenu:")
-        print("1) Compress (Fast) – only 256 single transforms")
+        print("1) Compress (Fast) – only 256 single transforms (takes seconds)")
         print("2) Compress (Ultra) – all 65535 pairs + backend (max 300s)")
         print("3) Compress (Ultra LZH) – pairs + LZ77+Huffman (max 300s)")
         print("4) Decompress")
         print("5) Full self‑test (all 65535 indices)")
         if USE_QUANTUM and HAS_QISKIT:
             print("6) Configure quantum qubits (current: {})".format(c.QUANTUM_QUBITS))
+            print("   (Variation count = 2^{} = {})".format(c.QUANTUM_QUBITS, c.get_quantum_variation_count()))
         print("0) Exit")
         choice = input("> ").strip()
         if choice == "1":
