@@ -6,10 +6,12 @@ PJP – 256 Lossless Transforms + 2704 Transform‑Pair Sequences
 + Transforms 28–30 + .docx transforms 31–32 (now lossless – identity)
 + Zaden Block Optimization + Algorithm 36 (powers‑of‑two + smart candidates)
   Option 9 tries all three and picks the best.
-  Algorithm 36 header: 0x36 + pad_len (1 byte) + pass_index (1 byte, 0‑23)
-  For small files (≤40 bytes), it also tries the mean, median, and each chunk value.
+  Algorithm 36 header: 0xff 0x02 + pad_len (1 byte) + pass_index (1 byte, 0‑23)
+  Zaden header: 0xff 0x01 + block_size (4 bytes) + num_blocks (4 bytes) + keys...
+  For small files (≤40 bytes), Algorithm 36 also tries the mean, median, and each chunk value.
 
 ** 6‑bit transform fully corrected – now 100% lossless **
+** All special formats use 0xff escape prefix – no header collisions **
 ============================================================================
 """
 
@@ -215,6 +217,9 @@ PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p ** 
 PI_DIGITS = [79, 17, 111]
 BLOCK_SIZE = 1024
 
+# New: reserved escape prefix for special formats
+ESCAPE_PREFIX = 0xFF  # not used by normal PJP headers
+
 def find_nearest_prime_around(n: int) -> int:
     o = 0
     while True:
@@ -247,6 +252,12 @@ SIXBIT_TO_CHAR = {i: ch for ch, i in CHAR_TO_6BIT.items()}
 
 # ---------- Main Compressor Class ----------
 class PJPCompressor:
+    # Special format magics (all start with 0xff)
+    ZADEN_MAGIC_PREFIX = b'\xff\x01'
+    ALGO36_MAGIC_PREFIX = b'\xff\x02'
+    MAGIC_DICT = b'\xff\x03'       # followed by version byte
+    MAGIC_LINE = b'\xff\x05'
+
     def __init__(self):
         download_and_merge_dictionaries()
 
@@ -1892,9 +1903,6 @@ class PJPCompressor:
     # ------------------------------------------------------------------
     # Dictionary compression helpers (for hybrid mode)
     # ------------------------------------------------------------------
-    MAGIC_DICT = b'DICT'
-    MAGIC_LINE = b'LINE'
-
     def _tokenize_with_static_dict(self, data: bytes) -> Optional[bytes]:
         try:
             text = data.decode('utf-8')
@@ -2088,7 +2096,7 @@ class PJPCompressor:
     # ------------------------------------------------------------------
     # Zaden Block Optimization with time‑limited search and variable‑length key coding
     # ------------------------------------------------------------------
-    ZADEN_MAGIC = 0x33  # single byte header
+    # ZADEN_MAGIC is now defined as class constant ZADEN_MAGIC_PREFIX = b'\xff\x01'
 
     def _encode_key_unary(self, key: int) -> bytes:
         """
@@ -2219,7 +2227,7 @@ class PJPCompressor:
             transformed_data, keys = self._block_optimize(data, block_size, quantum_boost, time_limit)
             inner_compressed = self.compress_with_best(transformed_data, safe=False, ultra=True,
                                                        include_28=True, include_29=True, include_30=True)
-            magic = bytes([self.ZADEN_MAGIC])
+            magic = self.ZADEN_MAGIC_PREFIX
             num_blocks = len(keys)
             header = struct.pack('<II', block_size, num_blocks)
             key_bytes = b''.join(self._encode_key_unary(k1) + self._encode_key_unary(k2) for k1, k2 in keys)
@@ -2255,7 +2263,7 @@ class PJPCompressor:
     # Store pass index (0‑23) as a single byte.
     # For small files (≤40 bytes), we add the mean, median, and each chunk value.
     # ------------------------------------------------------------------
-    ALGO36_MAGIC = 0x36
+    # ALGO36_MAGIC_PREFIX = b'\xff\x02' is defined as class constant.
 
     def algorithm_36_compress(self, data: bytes, time_limit: float = 300.0) -> bytes:
         """
@@ -2264,10 +2272,10 @@ class PJPCompressor:
         - For each pass, compute sum of absolute deviations from mean after subtraction.
         - Choose pass with minimal metric.
         - Transform data with that pass, then compress with full PJP (all transforms).
-        - Output: magic 0x36 + pad_len (1 byte) + pass_index (1 byte, 0-23) + compressed_data.
+        - Output: magic prefix (0xff 0x02) + pad_len (1 byte) + pass_index (1 byte, 0-23) + compressed_data.
         """
         if len(data) == 0:
-            return bytes([self.ALGO36_MAGIC, 0, 0])
+            return self.ALGO36_MAGIC_PREFIX + bytes([0, 0])
 
         pad_len = (3 - len(data) % 3) % 3
         padded = data + b'\x00' * pad_len
@@ -2276,7 +2284,7 @@ class PJPCompressor:
             values.append(int.from_bytes(padded[i:i+3], 'little'))
         n = len(values)
         if n == 0:
-            return bytes([self.ALGO36_MAGIC, pad_len, 0]) + self._compress_backend(b'', safe=False)
+            return self.ALGO36_MAGIC_PREFIX + bytes([pad_len, 0]) + self._compress_backend(b'', safe=False)
 
         # Build candidate passes
         candidates = set()
@@ -2325,7 +2333,7 @@ class PJPCompressor:
         # However, we might want to use the non-power candidate if it's better, but we can't store it with 1 byte.
         # So we stick to powers of two for the stored pass.
         # But we can still use the non-power candidate for transformation? No, we need the pass for decompression.
-        # Therefore we must only use powers of two.
+        # Therefore we must only use powers of two for the final choice.
         # So we only consider powers of two for the final choice.
         # We'll compute metrics for all passes (including non-powers) but only use powers for storage.
         # In practice, for small files, the best power might not be optimal, but we accept that.
@@ -2354,7 +2362,8 @@ class PJPCompressor:
         # compress with full PJP
         compressed = self.compress_with_best(bytes(transformed), safe=False, ultra=True,
                                              include_28=True, include_29=True, include_30=True)
-        out = bytearray([self.ALGO36_MAGIC, pad_len, best_idx])
+        out = bytearray(self.ALGO36_MAGIC_PREFIX)
+        out.extend([pad_len, best_idx])
         out.extend(compressed)
         return bytes(out)
 
@@ -2362,9 +2371,9 @@ class PJPCompressor:
         """
         Decompress Algorithm 36 format.
         """
-        if not data or data[0] != self.ALGO36_MAGIC:
+        if not data or not data.startswith(self.ALGO36_MAGIC_PREFIX):
             return None
-        pos = 1
+        pos = len(self.ALGO36_MAGIC_PREFIX)
         if len(data) < pos + 2:
             return None
         pad_len = data[pos]; pos += 1
@@ -2422,8 +2431,8 @@ class PJPCompressor:
         # Compress the transformed data with Ultra (can also use hybrid, but we use Ultra for speed)
         block_compressed = self.compress_with_best(transformed_data, safe=False, ultra=True,
                                                    include_28=True, include_29=True, include_30=True)
-        # Build final output: magic 0x33, header, keys, inner compressed
-        magic = bytes([self.ZADEN_MAGIC])
+        # Build final output: magic prefix, header, keys, inner compressed
+        magic = self.ZADEN_MAGIC_PREFIX
         num_blocks = len(keys)
         header = struct.pack('<II', block_size, num_blocks)
         key_bytes = b''.join(self._encode_key_unary(k1) + self._encode_key_unary(k2) for k1, k2 in keys)
@@ -2511,8 +2520,8 @@ class PJPCompressor:
             print(f"Error reading file: {e}")
             return
 
-        # Check for Algorithm 36 magic (0x36)
-        if len(data) > 0 and data[0] == self.ALGO36_MAGIC:
+        # Check for special format prefixes (all start with 0xff)
+        if data.startswith(self.ALGO36_MAGIC_PREFIX):
             original = self.algorithm_36_decompress(data)
             if original is not None:
                 with open(outfile, 'wb') as f:
@@ -2523,8 +2532,7 @@ class PJPCompressor:
                 print("Decompression failed for Algorithm 36 data.")
                 return
 
-        # Check for Zaden magic (0x33)
-        if len(data) > 0 and data[0] == self.ZADEN_MAGIC:
+        if data.startswith(self.ZADEN_MAGIC_PREFIX):
             original = self.decompress_block_optimized(data)
             if original is not None:
                 with open(outfile, 'wb') as f:
@@ -2535,13 +2543,6 @@ class PJPCompressor:
                 print("Decompression failed for Zaden‑optimized data.")
                 return
 
-        if data.startswith(self.MAGIC_LINE):
-            original = self._decompress_line_dict(data)
-            if original is not None:
-                with open(outfile, 'wb') as f:
-                    f.write(original)
-                print(f"Decompressed (Line-Dict) → {outfile} ({len(original)} bytes)")
-                return
         if data.startswith(self.MAGIC_DICT + b'\x01'):
             original = self._decompress_static_dict(data)
             if original is not None:
@@ -2556,7 +2557,15 @@ class PJPCompressor:
                     f.write(original)
                 print(f"Decompressed (Dynamic-Dict) → {outfile} ({len(original)} bytes)")
                 return
+        if data.startswith(self.MAGIC_LINE):
+            original = self._decompress_line_dict(data)
+            if original is not None:
+                with open(outfile, 'wb') as f:
+                    f.write(original)
+                print(f"Decompressed (Line-Dict) → {outfile} ({len(original)} bytes)")
+                return
 
+        # Fallback to standard PJP
         original, seq = self._decompress_auto(data)
         if original == b'' and seq is None:
             print("Decompression failed – unknown format.")
@@ -2571,9 +2580,9 @@ class PJPCompressor:
         print(f"Decompressed ({seq_str}) → {outfile} ({len(original)} bytes)")
 
     def decompress_block_optimized(self, data: bytes) -> Optional[bytes]:
-        if len(data) == 0 or data[0] != self.ZADEN_MAGIC:
+        if len(data) == 0 or not data.startswith(self.ZADEN_MAGIC_PREFIX):
             return None
-        pos = 1  # skip magic byte
+        pos = len(self.ZADEN_MAGIC_PREFIX)  # skip magic prefix
         if len(data) < pos + 8:
             return None
         block_size, num_blocks = struct.unpack('<II', data[pos:pos+8])
@@ -3072,8 +3081,8 @@ def main():
     print(f"{PROGNAME} – 256 transforms + 2704 pairs + Base64 + 6‑bit text + Quantum + Transforms 28–30 + .docx transforms 31–32 (now lossless)")
     print("Option 9: tries Absolute (hybrid + all transforms), Zaden block optimization, and Algorithm 36; picks the smallest.")
     print("         Time limit per block can be set from 1 to 300 seconds.")
-    print("         Zaden files use a single‑byte header: 0x33.")
-    print("         Algorithm 36 header: 0x36 + pad_len + 1‑byte pass_index (0‑23).")
+    print("         Zaden files use prefix: 0xff 0x01.")
+    print("         Algorithm 36 files use prefix: 0xff 0x02 + pad_len + 1‑byte pass_index (0‑23).")
     print("         For files ≤40 bytes, Algorithm 36 also tests the mean, median, and each chunk value.")
     print("Dictionary entries are read as plain text or Base64‑encoded UTF‑8.")
     if paq is None and not HAS_ZSTD:
