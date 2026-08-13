@@ -46,14 +46,19 @@ PRIMES = [p for p in range(2, 256) if all(p % d != 0 for d in range(2, int(p ** 
 PI_DIGITS = [79, 17, 111]
 BLOCK_SIZE = 1024  # for transform 26
 
-# ---------- Helper: nearest prime ----------
+# ---------- Helper: nearest prime (always in byte range) ----------
 def find_nearest_prime_around(n: int) -> int:
+    """
+    Return the nearest prime to n, but always within [2, 255].
+    This fixes the previous bug where primes > 255 could be returned
+    and cause ValueError with bytearray XOR.
+    """
     o = 0
     while True:
         c1, c2 = n - o, n + o
-        if c1 >= 2 and all(c1 % d != 0 for d in range(2, int(c1 ** 0.5) + 1)):
+        if c1 >= 2 and c1 <= 255 and all(c1 % d != 0 for d in range(2, int(c1 ** 0.5) + 1)):
             return c1
-        if c2 >= 2 and all(c2 % d != 0 for d in range(2, int(c2 ** 0.5) + 1)):
+        if c2 >= 2 and c2 <= 255 and all(c2 % d != 0 for d in range(2, int(c2 ** 0.5) + 1)):
             return c2
         o += 1
 
@@ -415,7 +420,7 @@ class PAQJPCompressor:
         t = bytearray(d)
         sh = len(d) % len(self.PI_DIGITS)
         pi_rot = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
-        p = find_nearest_prime_around(len(d) % 256)
+        p = find_nearest_prime_around(len(d) % 256) & 0xFF
         for i in range(len(t)): t[i] ^= p
         for _ in range(r):
             for i in range(len(t)): t[i] ^= pi_rot[i % len(pi_rot)]
@@ -426,9 +431,9 @@ class PAQJPCompressor:
         t = bytearray(d)
         sh = len(d) % len(self.PI_DIGITS)
         pi_rot = self.PI_DIGITS[sh:] + self.PI_DIGITS[:sh]
-        p = find_nearest_prime_around(len(d) % 256)
+        p = find_nearest_prime_around(len(d) % 256) & 0xFF
         seed = self.get_seed(len(d) % len(self.seed_tables), len(d))
-        for i in range(len(t)): t[i] ^= p ^ seed
+        for i in range(len(t)): t[i] ^= (p ^ seed) & 0xFF
         for _ in range(r):
             for i in range(len(t)): t[i] ^= pi_rot[i % len(pi_rot)] ^ (i % 256)
         return bytes(t)
@@ -478,7 +483,7 @@ class PAQJPCompressor:
             prime_values.append(current_value)
             count += 1
         t = bytearray(d)
-        xor_value = prime_values[-1] if prime_values else 0
+        xor_value = (prime_values[-1] if prime_values else 0) & 0xFF
         for i in range(len(t)): t[i] ^= xor_value
         repeat_byte = (repeats - 1) % 256
         return bytes([repeat_byte]) + bytes(t)
@@ -495,7 +500,7 @@ class PAQJPCompressor:
             current_value = find_nearest_prime_around(current_value)
             prime_values.append(current_value)
             count += 1
-        xor_value = prime_values[-1] if prime_values else 0
+        xor_value = (prime_values[-1] if prime_values else 0) & 0xFF
         for i in range(len(t)): t[i] ^= xor_value
         return bytes(t)
 
@@ -909,7 +914,7 @@ class PAQJPCompressor:
     # ------------------------------------------------------------------
     def full_self_test(self) -> bool:
         print("=" * 60)
-        print("PAQJP 8.8 – FULL SELF‑TEST (100% lossless)")
+        print("PAQJP 8.9 – FULL SELF‑TEST (100% lossless)")
         print("=" * 60)
         all_ok = True
 
@@ -963,7 +968,43 @@ class PAQJPCompressor:
             return False
         print("  PASS: all pairs OK on all bytes")
 
-        # 3. Random data full pipeline
+        # 3. Critical length test (catches byte-overflow bugs like the prime >255 issue)
+        print("\nTesting all transforms and pairs on 255‑byte data (critical length)...")
+        crit_data = bytes([0xA5]) * 255
+        for t_num in range(1, 257):
+            try:
+                enc = self.fwd_transforms[t_num](crit_data)
+                dec = self.rev_transforms[t_num](enc)
+                if dec != crit_data:
+                    print(f"  FAIL: transform {t_num} on 255‑byte data")
+                    all_ok = False
+                    break
+            except Exception as e:
+                print(f"  FAIL: transform {t_num} on 255‑byte data raised {e}")
+                all_ok = False
+                break
+        if all_ok:
+            print("  PASS: all single transforms on 255‑byte data")
+            # Also test all pairs on 255‑byte data
+            for idx, seq in enumerate(self.sequences):
+                try:
+                    enc = self._apply_sequence(crit_data, seq)
+                    dec = self._reverse_sequence(enc, seq)
+                    if dec != crit_data:
+                        print(f"  FAIL: pair {seq} on 255‑byte data")
+                        all_ok = False
+                        break
+                except Exception as e:
+                    print(f"  FAIL: pair {seq} on 255‑byte data raised {e}")
+                    all_ok = False
+                    break
+            if all_ok:
+                print("  PASS: all pairs on 255‑byte data")
+        if not all_ok:
+            print("\n[FAIL] Critical length test failed.")
+            return False
+
+        # 4. Random data full pipeline
         print("\nTesting random 1000‑byte block through full compress/decompress...")
         rng = random.Random(12345)
         test_data = bytes(rng.randint(0, 255) for _ in range(1000))
@@ -977,7 +1018,7 @@ class PAQJPCompressor:
 
         print("  PASS: random data pipeline OK in both modes")
 
-        # 4. Empty input
+        # 5. Empty input
         print("\nTesting empty input...")
         for safe in [False, True]:
             compressed_empty = self.compress_with_best(b'', safe)
