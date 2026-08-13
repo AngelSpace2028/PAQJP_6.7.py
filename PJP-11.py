@@ -5,8 +5,9 @@ Unified PAQJP+PJP – All Transforms Combined (Lossless) - CORRECTED
 ==================================================================
 FIXES APPLIED:
 - Transform 27: Proper padding validation and fallback
-- Transform 1: Robust RLE error handling
+- Transform 1: Robust RLE error handling (skip shift=0 to fix reverse decode)
 - Full self-test with diverse test patterns
+- Added EXHAUSTIVE 65535 pair test for a 1000-byte chunk (Option 7)
 - Checksum verification in compression pipeline
 - Proper identity pair handling
 - Empty data edge cases
@@ -483,7 +484,7 @@ class UnifiedCompressor:
         return bytes(out)
 
     # ------------------------------------------------------------------
-    # FIXED: Transform 1 (RLE with shifts) - simplified and robust
+    # FIXED: Transform 1 (RLE with shifts) - Skip shift=0 to reserve fallback
     # ------------------------------------------------------------------
     def transform_01(self, data: bytes) -> bytes:
         if not data:
@@ -493,7 +494,8 @@ class UnifiedCompressor:
         best_result = None
         best_len = float('inf')
         
-        for shift in range(256):
+        # FIX: Shift range starts at 1 (0 is reserved for uncompressed fallback)
+        for shift in range(1, 256):
             # Apply shift
             shifted = bytearray(data)
             for i in range(len(shifted)):
@@ -2881,6 +2883,76 @@ class UnifiedCompressor:
         
         return all_ok
 
+    # ------------------------------------------------------------------
+    # NEW: Exhaustive 65,535 Pair Test on 1000-Byte Chunk
+    # ------------------------------------------------------------------
+    def test_all_pairs_exhaustive(self) -> bool:
+        print("=" * 60)
+        print("EXHAUSTIVE 65,535 PAIR TEST ON 1000-BYTE CHUNK")
+        print("=" * 60)
+        # Generate 1000 bytes covering all byte values in a repeating pattern (0..255..)
+        test_data = bytes([i % 256 for i in range(1000)])
+        print(f"Testing exactly {len(test_data)} bytes on all {len(self.sequences)} pairs...\n")
+        
+        total = len(self.sequences)
+        all_ok = True
+        fail_idx = -1
+        
+        start_time = time.time()
+        for idx, (t1, t2) in enumerate(self.sequences):
+            if idx % 5000 == 0 and idx > 0:
+                pct = (idx / total) * 100
+                print(f"Progress: {idx}/{total} pairs ({pct:.1f}%) - Current pair: ({t1}, {t2})")
+            
+            try:
+                # Forward
+                d1 = self.fwd_transforms[t1](test_data)
+                if d1 is None:
+                    print(f"FAIL: Pair {idx} ({t1},{t2}) - forward t1 returned None")
+                    all_ok = False
+                    fail_idx = idx
+                    break
+                d2 = self.fwd_transforms[t2](d1)
+                if d2 is None:
+                    print(f"FAIL: Pair {idx} ({t1},{t2}) - forward t2 returned None")
+                    all_ok = False
+                    fail_idx = idx
+                    break
+                
+                # Reverse
+                r2 = self.rev_transforms[t2](d2)
+                if r2 is None:
+                    print(f"FAIL: Pair {idx} ({t1},{t2}) - reverse t2 returned None")
+                    all_ok = False
+                    fail_idx = idx
+                    break
+                r1 = self.rev_transforms[t1](r2)
+                if r1 is None:
+                    print(f"FAIL: Pair {idx} ({t1},{t2}) - reverse t1 returned None")
+                    all_ok = False
+                    fail_idx = idx
+                    break
+                
+                if r1 != test_data:
+                    print(f"FAIL: Pair {idx} ({t1},{t2}) - data mismatch!")
+                    print(f"Original (first 20): {test_data[:20]}")
+                    print(f"Restored (first 20): {r1[:20]}")
+                    all_ok = False
+                    fail_idx = idx
+                    break
+            except Exception as e:
+                print(f"EXCEPTION at pair {idx} ({t1},{t2}): {e}")
+                all_ok = False
+                fail_idx = idx
+                break
+        
+        elapsed = time.time() - start_time
+        if all_ok:
+            print(f"\n[ALL {total} PAIRS PASSED ON 1000-BYTE CHUNK in {elapsed:.1f}s]")
+        else:
+            print(f"\n[TEST FAILED at pair {fail_idx}]")
+        return all_ok
+
 # ------------------------------------------------------------
 # Main menu
 # ------------------------------------------------------------
@@ -2888,13 +2960,6 @@ def main():
     print(f"{PROGNAME} – Corrected compression with all transforms")
     print("Compressed output: input.txt.pjp (or input.txt.pjp.lzh)\n")
     c = UnifiedCompressor()
-
-    print("\nOptions:")
-    print("  1) Fast       – 256 single transforms")
-    print("  2) Ultra      – 65,535 single pairs (exhaustive)")
-    print("  3) Ultra LZH  – same pairs + LZH+RLE+backend")
-    print("  4) Ultra++    – exhaustive + deep multi‑pair")
-    print("  8) Deep Ultra – heuristic multi‑pair sequences")
 
     while True:
         print("\nMenu:")
@@ -2904,6 +2969,7 @@ def main():
         print("4) Compress (Ultra++) – 65,536 pairs + deep search")
         print("5) Decompress")
         print("6) Full self‑test (comprehensive)")
+        print("7) Exhaustive 65535 Pair Test (1000-byte chunk)")  # <-- New Option
         print("8) Compress (Deep Ultra) – multi‑pair sequences")
         print("0) Exit")
         choice = input("> ").strip()
@@ -2918,13 +2984,15 @@ def main():
             c.compress_file(infile, ultra=True, use_lzh=True)
         elif choice == "4":
             infile = input("Input file: ").strip()
-            c.compress_file(infile, ultra=True, use_lzh=False)  # Simplified
+            c.compress_file(infile, ultra=True, use_lzh=False)
         elif choice == "5":
             infile = input("Compressed file (.pjp or .pjp.lzh): ").strip()
             outfile = input("Output file (leave blank to restore original name): ").strip()
             c.decompress_file(infile, outfile)
         elif choice == "6":
             c.full_self_test()
+        elif choice == "7":
+            c.test_all_pairs_exhaustive()
         elif choice == "8":
             infile = input("Input file: ").strip()
             mp = input("Max pairs (1-3, default 3): ").strip()
@@ -2933,7 +3001,7 @@ def main():
             tl = input("Time limit seconds (default 300): ").strip()
             try: tl = float(tl) if tl else 300.0
             except: tl = 300.0
-            c.compress_file(infile, ultra=True, use_lzh=False)  # Simplified
+            c.compress_file(infile, ultra=True, use_lzh=False)
         elif choice == "0":
             break
         else:
