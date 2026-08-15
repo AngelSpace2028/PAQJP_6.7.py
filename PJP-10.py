@@ -3199,11 +3199,15 @@ class UnifiedCompressor:
             print(f"Error writing output file: {e}"); return
         print(f"Compressed {len(data)} → {len(compressed)} bytes → {outfile}")
 
-    def decompress_file(self, infile: str, outfile: str = ""):
+    def decompress_file(self, infile: str, outfile: str = "") -> bool:
+        """Returns True on success, False on failure."""
         try:
-            with open(infile, 'rb') as f: data = f.read()
+            with open(infile, 'rb') as f:
+                data = f.read()
         except Exception as e:
-            print(f"Error reading file: {e}"); return
+            print(f"Error reading file: {e}")
+            return False
+
         try:
             if data.startswith(b'DICT'):
                 if data.startswith(b'DICT\x01'):
@@ -3211,7 +3215,8 @@ class UnifiedCompressor:
                 elif data.startswith(b'DICT\x02'):
                     original = self._decompress_dynamic_dict(data)
                 else:
-                    print("Unknown dictionary format"); return
+                    print("Unknown dictionary format")
+                    return False
             elif data.startswith(b'LINE'):
                 original = self._decompress_line_dict(data)
             else:
@@ -3224,13 +3229,15 @@ class UnifiedCompressor:
                         payload = data[offset:]
                         decompressed = self._decompress_backend(payload)
                         if decompressed is None:
-                            print("Decompression failed: backend error"); return
+                            print("Decompression failed: backend error")
+                            return False
                         original = decompressed
                         for t1, t2 in reversed(pairs):
                             original = self.rev_transforms[t2](original)
                             original = self.rev_transforms[t1](original)
                     else:
-                        print("Decompression failed: invalid header."); return
+                        print("Decompression failed: invalid header.")
+                        return False
                 else:
                     if offset < len(data) and data[offset] == 0xFF:
                         original = self._decompress_lzh_pipeline(data)
@@ -3238,23 +3245,32 @@ class UnifiedCompressor:
                         try:
                             original, _ = self._decompress_auto(data)
                         except DecompressionError as e:
-                            print(f"Decompression failed: {e}"); return
+                            print(f"Decompression failed: {e}")
+                            return False
         except DecompressionError as e:
-            print(f"Decompression failed: {e}"); return
+            print(f"Decompression failed: {e}")
+            return False
         except Exception as e:
-            print(f"Decompression failed with unexpected error: {e}"); return
+            print(f"Decompression failed with unexpected error: {e}")
+            return False
 
         if original is None:
-            print("Decompression failed: produced None"); return
+            print("Decompression failed: produced None")
+            return False
+
         if not outfile:
             base = os.path.basename(infile)
             name_without_suffix = re.sub(r'\.pjp(\.lzh)?$', '', base)
             outfile = name_without_suffix
+
         try:
             self._atomic_write(outfile, original)
         except Exception as e:
-            print(f"Error writing output file: {e}"); return
+            print(f"Error writing output file: {e}")
+            return False
+
         print(f"Decompressed → {outfile} ({len(original)} bytes)")
+        return True
 
     # ------------------------------------------------------------------
     # Full self‑test
@@ -3396,9 +3412,16 @@ def main():
             infile = input("Input file: ").strip()
             c.compress_file_ultra_plus(infile)
         elif choice == "5":
-            infile = input("Compressed file (.pjp or .pjp.lzh): ").strip()
-            outfile = input("Output file (leave blank to restore original name): ").strip()
-            c.decompress_file(infile, outfile)
+            # Loop until success or user cancels
+            while True:
+                infile = input("Compressed file (.pjp or .pjp.lzh) [press Enter to cancel]: ").strip()
+                if not infile:
+                    break
+                outfile = input("Output file (leave blank to restore original name): ").strip()
+                if c.decompress_file(infile, outfile):
+                    break
+                else:
+                    print("Decompression failed. Try another file or press Enter to cancel.")
         elif choice == "6":
             c.full_self_test()
         elif choice == "7" and USE_QUANTUM and HAS_QISKIT:
