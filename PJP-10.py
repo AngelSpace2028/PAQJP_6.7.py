@@ -3417,6 +3417,10 @@ def main():
                 infile = input("Compressed file (.pjp or .pjp.lzh) [press Enter to cancel]: ").strip()
                 if not infile:
                     break
+                # --- FORMAT CHECK ---
+                if not (infile.lower().endswith('.pjp') or infile.lower().endswith('.pjp.lzh')):
+                    print("Error: Incorrect format. Only .pjp and .pjp.lzh files are supported.")
+                    continue
                 outfile = input("Output file (leave blank to restore original name): ").strip()
                 if c.decompress_file(infile, outfile):
                     break
