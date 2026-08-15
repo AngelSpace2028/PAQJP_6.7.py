@@ -3,7 +3,7 @@ UPGRADE\_PAQJPVG Compression hybrid Software PJP-2,3 Quantum software is working
 PAQJPVG_8.5-4 Replit App by Jurijus Pacalovas 8.5L-4 PAQ level 9 and zstandard level 22
 https://6d12ff49-574e-490c-a27e-ce0b42018552-00-2nsbwpijno5md.kirk.replit.dev
 
-PJP-10The best paq level default and zstandard level 22 Done all 2026 year in May 6 by Jurijus Pacalovas and Vincent Geoghegan (I recommend version 8.4 it’s 1.3KB/s)
+PJP-10 The best paq level default and zstandard level 22 Done all 2026 year in May 6 by Jurijus Pacalovas and Vincent Geoghegan
 
 Python 3.7.4
 atomic install 5 pips
