@@ -5,7 +5,6 @@ Unified PAQJP+PJP – All Transforms Combined (Lossless)
 =======================================================
 - 256 base transforms + 65,535 transform pairs (Ultra mode)
 - NEW: Deep Ultra mode – sequences of 1–3 pairs → up to 281 trillion variations
-  (heuristic random search, time‑limited)
 - NEW: Ultra++ mode – exhaustive 65,536 pairs + deep multi‑pair (option 4)
 - Time‑limited modes (default 300s)
 - Final verification + fallback to raw+backend
@@ -35,33 +34,31 @@ from typing import Optional, List, Tuple, Dict, Callable, Any
 from collections import Counter
 
 # ------------------------------------------------------------------
-# Optional backends
+# Optional backend: paq (restored for Option 2)
 # ------------------------------------------------------------------
 try:
     import paq
 except ImportError:
     paq = None
-try:
-    import zstandard as zstd
-    zstd_cctx = zstd.ZstdCompressor(level=22)
-    zstd_dctx = zstd.ZstdDecompressor()
-    HAS_ZSTD = True
-except ImportError:
-    HAS_ZSTD = False
 
 USE_QUANTUM = False
 HAS_QISKIT = False
+HAS_ZSTD = False
 
 def install_package(pkg: str) -> bool:
+    """Install a package non‑interactively."""
     print(f"Installing {pkg}...")
     try:
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install', pkg])
+        subprocess.check_call([
+            sys.executable, '-m', 'pip', 'install',
+            '--no-input', '--disable-pip-version-check', pkg
+        ])
         return True
     except Exception:
         return False
 
-# ---------- Prompt for quantum ----------
-quantum_choice = input("Enable quantum‑inspired transforms (requires Qiskit)? (y/n): ").strip().lower()
+# ---------- Prompt 1: Quantum ----------
+quantum_choice = input("Option 1: Enable quantum‑inspired transforms (requires Qiskit)? (y/n) [default n]: ").strip().lower()
 if quantum_choice == 'y':
     try:
         from qiskit import QuantumCircuit
@@ -74,24 +71,53 @@ if quantum_choice == 'y':
                 from qiskit import QuantumCircuit
                 HAS_QISKIT = True
                 USE_QUANTUM = True
+                print("Quantum transforms ENABLED.")
             except ImportError:
-                pass
+                print("Qiskit installation failed or import still failing. Quantum transforms disabled.")
+        else:
+            print("Qiskit installation failed. Quantum transforms disabled.")
 else:
     print("Quantum transforms disabled.")
 
-# ---------- Prompt for 5 optional backends ----------
-other_choice = input("Install 5 optional compression backends (zstandard, paq, mpmath, cython, python-docx)? (y/n): ").strip().lower()
+# ---------- Prompt 2: Four optional backends (RESTORED) ----------
+other_choice = input("Option 2: Install 4 optional backends (mpmath, cython, paq, python-docx)? (y/n) [default n]: ").strip().lower()
 if other_choice == 'y':
-    for pkg in ['mpmath', 'zstandard', 'cython', 'paq', 'python-docx']:
+    for pkg in ['mpmath', 'cython', 'paq', 'python-docx']:
         try:
             importlib.import_module(pkg)
+            print(f"{pkg} already installed.")
         except ImportError:
             install_package(pkg)
 else:
-    print("Skipping optional backends.")
+    print("Skipping 4 optional backends.")
 
-if USE_QUANTUM and not HAS_QISKIT:
-    USE_QUANTUM = False
+# ---------- Prompt 3: Zstandard (MANDATORY - RESTORED) ----------
+zstd_choice = input("Option 3: Install zstandard backend? (mandatory, y/n) [default y]: ").strip().lower()
+if zstd_choice == 'n':
+    print("ERROR: zstandard is mandatory for this tool. Exiting.")
+    sys.exit(1)
+else:
+    # Ensure zstandard is installed and imported
+    try:
+        import zstandard as zstd
+        zstd_cctx = zstd.ZstdCompressor(level=22)
+        zstd_dctx = zstd.ZstdDecompressor()
+        HAS_ZSTD = True
+        print("zstandard already installed and loaded.")
+    except ImportError:
+        if install_package('zstandard'):
+            try:
+                import zstandard as zstd
+                zstd_cctx = zstd.ZstdCompressor(level=22)
+                zstd_dctx = zstd.ZstdDecompressor()
+                HAS_ZSTD = True
+                print("zstandard installed successfully.")
+            except ImportError:
+                print("CRITICAL ERROR: Failed to import zstandard after automatic installation.")
+                sys.exit(1)
+        else:
+            print("CRITICAL ERROR: Failed to install zstandard. Please install it manually (`pip install zstandard`) and restart.")
+            sys.exit(1)
 
 PROGNAME = "UnifiedPAQJP+PJP"
 
@@ -312,7 +338,6 @@ class UnifiedCompressor:
         self.static_dict, self.word_to_index = self._load_static_dictionary()
         self.line_dict, self.line_to_index = self._load_line_dictionary()
 
-        # Quantum transforms will be built later (if enabled)
         self.quantum_transforms_built = False
         if USE_QUANTUM and HAS_QISKIT:
             self._precompute_quantum_transforms()
