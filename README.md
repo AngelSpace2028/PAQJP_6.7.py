@@ -5,6 +5,8 @@ https://6d12ff49-574e-490c-a27e-ce0b42018552-00-2nsbwpijno5md.kirk.replit.dev
 
 PJP-10 The best paq level default and zstandard level 22 Done all 2026 year in May 6 by Jurijus Pacalovas and Vincent Geoghegan
 
+https://unified-paqjp-pjp--pjmidgard.replit.app/
+
 Python 3.7.4
 atomic install 5 pips
 pip install zstandard  
