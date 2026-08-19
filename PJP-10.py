@@ -6,13 +6,14 @@ Unified PAQJP+PJP – All Transforms Combined (Lossless)
 - 256 base transforms + 65,535 transform pairs (Ultra mode)
 - NEW: Deep Ultra mode – sequences of 1–3 pairs → up to 281 trillion variations
 - NEW: Ultra++ mode – exhaustive 65,536 pairs + deep multi‑pair (option 4)
-- Time‑limited modes (default 300s)
+- Time‑limited modes (default 300s) with optional prompt on expiration
 - Final verification + fallback to raw+backend
 - Quantum‑inspired transforms (optional)
 - Exhaustive self‑test
 - Output naming: input.txt.pjp (or .pjp.lzh)
 - ALL 256 base transforms are now individually lossless for every input.
 - Composition of lossless transforms is lossless → all 65,535 pairs are lossless.
+- Saves best transform/sequence to pjp_settings.json after successful compression.
 """
 
 import math
@@ -30,6 +31,7 @@ import sys
 import subprocess
 import importlib
 import time
+import json
 from typing import Optional, List, Tuple, Dict, Callable, Any
 from collections import Counter
 
@@ -44,6 +46,8 @@ except ImportError:
 USE_QUANTUM = False
 HAS_QISKIT = False
 HAS_ZSTD = False
+
+SETTINGS_FILE = "pjp_settings.json"
 
 def install_package(pkg: str) -> bool:
     """Install a package non‑interactively."""
@@ -309,6 +313,28 @@ class DecompressionError(Exception):
     pass
 
 # ------------------------------------------------------------------
+# Helper functions for time limit prompts
+# ------------------------------------------------------------------
+def prompt_time_limit(default=300.0):
+    """Ask the user for a time limit in seconds."""
+    while True:
+        raw = input(f"Time limit in seconds (default {default}): ").strip()
+        if not raw:
+            return default
+        try:
+            val = float(raw)
+            if val <= 0:
+                print("Time limit must be positive.")
+                continue
+            return val
+        except ValueError:
+            print("Invalid number. Please enter a positive number of seconds.")
+
+def ask_yes_no(prompt):
+    """Ask a simple yes/no question."""
+    return input(prompt).strip().lower() in ('y', 'yes')
+
+# ------------------------------------------------------------------
 # Main Compressor Class – Unified
 # ------------------------------------------------------------------
 class UnifiedCompressor:
@@ -341,6 +367,53 @@ class UnifiedCompressor:
         self.quantum_transforms_built = False
         if USE_QUANTUM and HAS_QISKIT:
             self._precompute_quantum_transforms()
+
+        # Saved settings
+        self.saved_settings = self._load_settings()
+
+    # ------------------------------------------------------------------
+    # Settings load/save
+    # ------------------------------------------------------------------
+    def _load_settings(self):
+        """Load previous settings from JSON file."""
+        if not os.path.exists(SETTINGS_FILE):
+            return {}
+        try:
+            with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_settings(self, settings):
+        """Save settings to JSON file (atomic)."""
+        tmp = SETTINGS_FILE + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(settings, f, indent=2)
+        os.replace(tmp, SETTINGS_FILE)
+
+    # ------------------------------------------------------------------
+    # Time budget helper
+    # ------------------------------------------------------------------
+    def _time_budget(self, time_limit, ask_on_expire=False):
+        """Return an object that tracks time and optionally asks the user to extend."""
+        class TimeBudget:
+            def __init__(self, limit, ask):
+                self.limit = limit
+                self.end_time = time.time() + limit
+                self.ask = ask
+
+            def expired(self):
+                if time.time() <= self.end_time:
+                    return False
+                if self.ask:
+                    print("\nTime limit reached.")
+                    if ask_yes_no("Continue searching? (y/n): "):
+                        extra = prompt_time_limit(default=60.0)
+                        self.end_time = time.time() + extra
+                        return False
+                    return True
+                return True
+        return TimeBudget(time_limit, ask_on_expire)
 
     # ------------------------------------------------------------------
     # Quantum qubit configuration
@@ -2840,57 +2913,79 @@ class UnifiedCompressor:
     # Main compression methods (with final verification)
     # ------------------------------------------------------------------
     def compress_with_verification(self, data: bytes, ultra: bool = True,
-                                   time_limit: Optional[float] = None) -> bytes:
+                                   time_limit: Optional[float] = None,
+                                   ask_on_expire: bool = False) -> bytes:
         if time_limit is None:
             time_limit = self.ULTRA_TIME_LIMIT
         start_time = time.time()
         best_candidate = None
         best_len = float('inf')
+        best_sequence = ()
+        best_header = None
 
-        def try_candidate(header: bytes, transformed: bytes):
-            nonlocal best_candidate, best_len
+        budget = self._time_budget(time_limit, ask_on_expire)
+
+        def try_candidate(header: bytes, transformed: bytes, seq: Tuple[int, ...]):
+            nonlocal best_candidate, best_len, best_sequence, best_header
             candidate = header + self._compress_backend(transformed)
             if len(candidate) < best_len:
                 best_candidate = candidate
                 best_len = len(candidate)
+                best_sequence = seq
+                best_header = header
 
-        try_candidate(self._encode_marker_raw(), data)
+        # Raw fallback
+        try_candidate(self._encode_marker_raw(), data, ())
+
+        # Single transforms
         for t in range(1, 257):
-            if time_limit and time.time() - start_time > time_limit:
+            if budget.expired():
                 break
             try:
                 transformed = self.fwd_transforms[t](data)
-                # Verify lossless before committing
                 if not self._verify_lossless(data, transformed, self.rev_transforms[t]):
                     continue
-                try_candidate(self._encode_marker_single(t), transformed)
+                try_candidate(self._encode_marker_single(t), transformed, (t,))
             except (TransformError, Exception):
                 continue
 
+        # Pairs (Ultra)
         if ultra:
             for t1, t2 in self.sequences:
-                if time_limit and time.time() - start_time > time_limit:
+                if budget.expired():
                     break
                 try:
                     transformed = self.fwd_transforms[t1](data)
                     if not self._verify_lossless(data, transformed, self.rev_transforms[t1]):
                         continue
                     transformed = self.fwd_transforms[t2](transformed)
-                    if not self._verify_lossless(data, transformed, 
+                    if not self._verify_lossless(data, transformed,
                         lambda d: self.rev_transforms[t1](self.rev_transforms[t2](d))):
                         continue
-                    try_candidate(self._encode_marker_pair(t1, t2), transformed)
+                    try_candidate(self._encode_marker_pair(t1, t2), transformed, (t1, t2))
                 except (TransformError, Exception):
                     continue
 
         if best_candidate is None:
             best_candidate = self._encode_marker_raw() + self._compress_backend(data)
+            best_sequence = ()
+            best_header = self._encode_marker_raw()
 
         # Final verification
         decomp, _ = self._decompress_auto(best_candidate)
         if decomp == data:
+            self._save_settings({
+                'last_time_limit': time_limit,
+                'best_sequence': list(best_sequence),
+                'best_header': best_header.hex() if best_header else None,
+                'original_size': len(data),
+                'compressed_size': len(best_candidate),
+                'mode': 'verification',
+                'timestamp': time.time(),
+            })
             return best_candidate
 
+        # Fallback
         fallback = self._encode_marker_raw() + self._compress_backend(data)
         decomp_fb, _ = self._decompress_auto(fallback)
         if decomp_fb != data:
@@ -2900,18 +2995,23 @@ class UnifiedCompressor:
     # ------------------------------------------------------------------
     # NEW: Deep Ultra search using multiple pairs
     # ------------------------------------------------------------------
-    def compress_deep_ultra(self, data: bytes, max_pairs: int = 3, time_limit: float = 300.0) -> bytes:
+    def compress_deep_ultra(self, data: bytes, max_pairs: int = 3, time_limit: float = 300.0,
+                            ask_on_expire: bool = False) -> bytes:
         start_time = time.time()
         best_candidate = None
         best_len = float('inf')
+        best_sequence = ()
+        best_header = None
         raw_header = self._encode_marker_raw()
         raw_candidate = raw_header + self._compress_backend(data)
         best_candidate = raw_candidate
         best_len = len(raw_candidate)
 
+        budget = self._time_budget(time_limit, ask_on_expire)
+
         # Exhaustive single pairs
         for pair_idx in range(len(self.sequences)):
-            if time.time() - start_time > time_limit: break
+            if budget.expired(): break
             t1, t2 = self.pair_lookup[pair_idx]
             try:
                 transformed = self.fwd_transforms[t1](data)
@@ -2926,11 +3026,13 @@ class UnifiedCompressor:
             if len(candidate) < best_len:
                 best_candidate = candidate
                 best_len = len(candidate)
+                best_sequence = (t1, t2)
+                best_header = self._encode_marker_pair(t1, t2)
 
         # Random multi‑pair sequences
         num_pairs = len(self.sequences)
         rng = random.Random(42)
-        while time.time() - start_time < time_limit:
+        while not budget.expired():
             k = rng.randint(2, max_pairs)
             seq_indices = [rng.randrange(num_pairs) for _ in range(k)]
             transformed = data
@@ -2951,6 +3053,8 @@ class UnifiedCompressor:
             if len(candidate) < best_len:
                 best_candidate = candidate
                 best_len = len(candidate)
+                best_sequence = tuple(item for idx in seq_indices for item in self.pair_lookup[idx])
+                best_header = header
 
         decomp, _ = self._decompress_auto(best_candidate)
         if decomp != data:
@@ -2958,6 +3062,15 @@ class UnifiedCompressor:
             if self._decompress_auto(fallback)[0] != data:
                 raise RuntimeError("Fallback compression failed")
             return fallback
+        self._save_settings({
+            'last_time_limit': time_limit,
+            'best_sequence': list(best_sequence),
+            'best_header': best_header.hex() if best_header else None,
+            'original_size': len(data),
+            'compressed_size': len(best_candidate),
+            'mode': 'deep_ultra',
+            'timestamp': time.time(),
+        })
         return best_candidate
 
     def _reverse_deep_sequence(self, data: bytes, pair_indices: List[int]) -> bytes:
@@ -2972,18 +3085,23 @@ class UnifiedCompressor:
     # ------------------------------------------------------------------
     # NEW: Ultra++ method – exhaustive 65,536 pairs + deep multi‑pair
     # ------------------------------------------------------------------
-    def compress_ultra_plus(self, data: bytes, time_limit: float = 300.0) -> bytes:
+    def compress_ultra_plus(self, data: bytes, time_limit: float = 300.0,
+                            ask_on_expire: bool = False) -> bytes:
         start_time = time.time()
         best_candidate = None
         best_len = float('inf')
+        best_sequence = ()
+        best_header = None
         raw_header = self._encode_marker_raw()
         raw_candidate = raw_header + self._compress_backend(data)
         best_candidate = raw_candidate
         best_len = len(raw_candidate)
 
+        budget = self._time_budget(time_limit, ask_on_expire)
+
         # Single transforms 1‑256
         for t in range(1, 257):
-            if time.time() - start_time > time_limit: break
+            if budget.expired(): break
             try:
                 transformed = self.fwd_transforms[t](data)
                 if not self._verify_lossless(data, transformed, self.rev_transforms[t]):
@@ -2992,13 +3110,15 @@ class UnifiedCompressor:
                 if len(candidate) < best_len:
                     best_candidate = candidate
                     best_len = len(candidate)
+                    best_sequence = (t,)
+                    best_header = self._encode_marker_single(t)
             except (TransformError, Exception):
                 continue
 
         # Exhaustive all pairs
         for t1 in range(1, 257):
             for t2 in range(1, 257):
-                if time.time() - start_time > time_limit: break
+                if budget.expired(): break
                 try:
                     transformed = self.fwd_transforms[t1](data)
                     if not self._verify_lossless(data, transformed, self.rev_transforms[t1]):
@@ -3011,12 +3131,14 @@ class UnifiedCompressor:
                     if len(candidate) < best_len:
                         best_candidate = candidate
                         best_len = len(candidate)
+                        best_sequence = (t1, t2)
+                        best_header = self._encode_marker_pair(t1, t2)
                 except (TransformError, Exception):
                     continue
 
         # Random multi‑pair sequences (same as deep ultra, up to 3 pairs)
         rng = random.Random(42)
-        while time.time() - start_time < time_limit:
+        while not budget.expired():
             k = rng.randint(2, 3)
             seq_indices = [rng.randrange(len(self.sequences)) for _ in range(k)]
             transformed = data
@@ -3032,6 +3154,8 @@ class UnifiedCompressor:
             if len(candidate) < best_len:
                 best_candidate = candidate
                 best_len = len(candidate)
+                best_sequence = tuple(item for idx in seq_indices for item in self.pair_lookup[idx])
+                best_header = header
 
         decomp, _ = self._decompress_auto(best_candidate)
         if decomp != data:
@@ -3039,15 +3163,25 @@ class UnifiedCompressor:
             if self._decompress_auto(fallback)[0] != data:
                 raise RuntimeError("Ultra++ fallback compression failed")
             return fallback
+        self._save_settings({
+            'last_time_limit': time_limit,
+            'best_sequence': list(best_sequence),
+            'best_header': best_header.hex() if best_header else None,
+            'original_size': len(data),
+            'compressed_size': len(best_candidate),
+            'mode': 'ultra_plus',
+            'timestamp': time.time(),
+        })
         return best_candidate
 
-    def compress_file_ultra_plus(self, infile: str, outfile: str = "", time_limit: float = 300.0):
+    def compress_file_ultra_plus(self, infile: str, outfile: str = "", time_limit: float = 300.0,
+                                 ask_on_expire: bool = False):
         try:
             with open(infile, 'rb') as f: data = f.read()
         except Exception as e:
             print(f"Error reading file: {e}"); return
         try:
-            compressed = self.compress_ultra_plus(data, time_limit)
+            compressed = self.compress_ultra_plus(data, time_limit, ask_on_expire)
         except RuntimeError as e:
             print(f"Compression failed: {e}"); return
         if not outfile:
@@ -3059,13 +3193,14 @@ class UnifiedCompressor:
         print(f"Compressed {len(data)} → {len(compressed)} bytes → {outfile}")
 
     def compress_file_deep_ultra(self, infile: str, outfile: str = "",
-                                 max_pairs: int = 3, time_limit: float = 300.0):
+                                 max_pairs: int = 3, time_limit: float = 300.0,
+                                 ask_on_expire: bool = False):
         try:
             with open(infile, 'rb') as f: data = f.read()
         except Exception as e:
             print(f"Error reading file: {e}"); return
         try:
-            compressed = self.compress_deep_ultra(data, max_pairs, time_limit)
+            compressed = self.compress_deep_ultra(data, max_pairs, time_limit, ask_on_expire)
         except RuntimeError as e:
             print(f"Compression failed: {e}"); return
         if not outfile:
@@ -3077,34 +3212,41 @@ class UnifiedCompressor:
         print(f"Compressed {len(data)} → {len(compressed)} bytes → {outfile}")
 
     def compress_with_lzh(self, data: bytes, ultra: bool = True,
-                          time_limit: Optional[float] = None) -> bytes:
+                          time_limit: Optional[float] = None,
+                          ask_on_expire: bool = False) -> bytes:
         if time_limit is None:
             time_limit = self.ULTRA_TIME_LIMIT
         start_time = time.time()
         best_candidate = None
         best_len = float('inf')
+        best_sequence = ()
+        best_header = None
 
-        def try_candidate(header: bytes, transformed: bytes):
-            nonlocal best_candidate, best_len
+        budget = self._time_budget(time_limit, ask_on_expire)
+
+        def try_candidate(header: bytes, transformed: bytes, seq: Tuple[int, ...]):
+            nonlocal best_candidate, best_len, best_sequence, best_header
             lzh = self._encode_lzh(transformed)
             candidate = header + b'\xFF' + lzh
             if len(candidate) < best_len:
                 best_candidate = candidate
                 best_len = len(candidate)
+                best_sequence = seq
+                best_header = header
 
-        try_candidate(self._encode_marker_raw(), data)
+        try_candidate(self._encode_marker_raw(), data, ())
         for t in range(1, 257):
-            if time_limit and time.time() - start_time > time_limit: break
+            if budget.expired(): break
             try:
                 transformed = self.fwd_transforms[t](data)
                 if not self._verify_lossless(data, transformed, self.rev_transforms[t]):
                     continue
-                try_candidate(self._encode_marker_single(t), transformed)
+                try_candidate(self._encode_marker_single(t), transformed, (t,))
             except (TransformError, Exception): continue
 
         if ultra:
             for t1, t2 in self.sequences:
-                if time_limit and time.time() - start_time > time_limit: break
+                if budget.expired(): break
                 try:
                     transformed = self.fwd_transforms[t1](data)
                     if not self._verify_lossless(data, transformed, self.rev_transforms[t1]):
@@ -3113,7 +3255,7 @@ class UnifiedCompressor:
                     if not self._verify_lossless(data, transformed,
                         lambda d: self.rev_transforms[t1](self.rev_transforms[t2](d))):
                         continue
-                    try_candidate(self._encode_marker_pair(t1, t2), transformed)
+                    try_candidate(self._encode_marker_pair(t1, t2), transformed, (t1, t2))
                 except (TransformError, Exception): continue
 
         if best_candidate is None:
@@ -3125,6 +3267,15 @@ class UnifiedCompressor:
 
         decomp = self._decompress_lzh_pipeline(best_candidate)
         if decomp == data:
+            self._save_settings({
+                'last_time_limit': time_limit,
+                'best_sequence': list(best_sequence),
+                'best_header': best_header.hex() if best_header else None,
+                'original_size': len(data),
+                'compressed_size': len(best_candidate),
+                'mode': 'lzh',
+                'timestamp': time.time(),
+            })
             return best_candidate
 
         fallback = self._encode_marker_raw() + self._compress_backend(data)
@@ -3202,17 +3353,20 @@ class UnifiedCompressor:
         os.replace(tmpname, path)
 
     def compress_file(self, infile: str, outfile: str = "", ultra: bool = True,
-                      use_lzh: bool = False, time_limit: Optional[float] = None):
+                      use_lzh: bool = False, time_limit: Optional[float] = None,
+                      ask_on_expire: bool = False):
         try:
             with open(infile, 'rb') as f: data = f.read()
         except Exception as e:
             print(f"Error reading file: {e}"); return
         try:
             if use_lzh:
-                compressed = self.compress_with_lzh(data, ultra=ultra, time_limit=time_limit)
+                compressed = self.compress_with_lzh(data, ultra=ultra, time_limit=time_limit,
+                                                    ask_on_expire=ask_on_expire)
                 default_suffix = ".pjp.lzh"
             else:
-                compressed = self.compress_with_verification(data, ultra=ultra, time_limit=time_limit)
+                compressed = self.compress_with_verification(data, ultra=ultra, time_limit=time_limit,
+                                                             ask_on_expire=ask_on_expire)
                 default_suffix = ".pjp"
         except RuntimeError as e:
             print(f"Compression failed: {e}"); return
@@ -3424,18 +3578,36 @@ def main():
         print("8) Compress (Deep Ultra) – multi‑pair sequences (heuristic, up to 3 pairs)")
         print("0) Exit")
         choice = input("> ").strip()
-        if choice == "1":
+
+        if choice in ("1", "2", "3", "4", "8"):
             infile = input("Input file: ").strip()
-            c.compress_file(infile, ultra=False, use_lzh=False)
-        elif choice == "2":
-            infile = input("Input file: ").strip()
-            c.compress_file(infile, ultra=True, use_lzh=False)
-        elif choice == "3":
-            infile = input("Input file: ").strip()
-            c.compress_file(infile, ultra=True, use_lzh=True)
-        elif choice == "4":
-            infile = input("Input file: ").strip()
-            c.compress_file_ultra_plus(infile)
+            if not infile:
+                print("No input file.")
+                continue
+
+            # Ask for time limit
+            tl = prompt_time_limit(default=300.0)
+
+            # Ask if user wants to be prompted when time limit expires
+            ask = ask_yes_no("Prompt before stopping when time limit is reached? (y/n) [default n]: ")
+
+            if choice == "1":
+                c.compress_file(infile, ultra=False, use_lzh=False,
+                                time_limit=tl, ask_on_expire=ask)
+            elif choice == "2":
+                c.compress_file(infile, ultra=True, use_lzh=False,
+                                time_limit=tl, ask_on_expire=ask)
+            elif choice == "3":
+                c.compress_file(infile, ultra=True, use_lzh=True,
+                                time_limit=tl, ask_on_expire=ask)
+            elif choice == "4":
+                c.compress_file_ultra_plus(infile, time_limit=tl, ask_on_expire=ask)
+            elif choice == "8":
+                mp = input("Max pairs (1-3, default 3): ").strip()
+                try: mp = int(mp) if mp else 3
+                except: mp = 3
+                c.compress_file_deep_ultra(infile, max_pairs=mp,
+                                           time_limit=tl, ask_on_expire=ask)
         elif choice == "5":
             # Loop until success or user cancels
             while True:
@@ -3459,15 +3631,6 @@ def main():
                 c.set_quantum_qubits(q)
             except ValueError:
                 print("Invalid number.")
-        elif choice == "8":
-            infile = input("Input file: ").strip()
-            mp = input("Max pairs (1-3, default 3): ").strip()
-            try: mp = int(mp) if mp else 3
-            except: mp = 3
-            tl = input("Time limit seconds (default 300): ").strip()
-            try: tl = float(tl) if tl else 300.0
-            except: tl = 300.0
-            c.compress_file_deep_ultra(infile, max_pairs=mp, time_limit=tl)
         elif choice == "0":
             break
         else:
