@@ -13,7 +13,6 @@ Unified PAQJP+PJP – All Transforms Combined (Lossless)
 - Output naming: input.txt.pjp (or .pjp.lzh)
 - ALL 256 base transforms are now individually lossless for every input.
 - Composition of lossless transforms is lossless → all 65,535 pairs are lossless.
-- Saves best transform/sequence to pjp_settings.json after successful compression.
 """
 
 import math
@@ -31,7 +30,6 @@ import sys
 import subprocess
 import importlib
 import time
-import json
 from typing import Optional, List, Tuple, Dict, Callable, Any
 from collections import Counter
 
@@ -46,8 +44,6 @@ except ImportError:
 USE_QUANTUM = False
 HAS_QISKIT = False
 HAS_ZSTD = False
-
-SETTINGS_FILE = "pjp_settings.json"
 
 def install_package(pkg: str) -> bool:
     """Install a package non‑interactively."""
@@ -367,29 +363,6 @@ class UnifiedCompressor:
         self.quantum_transforms_built = False
         if USE_QUANTUM and HAS_QISKIT:
             self._precompute_quantum_transforms()
-
-        # Saved settings
-        self.saved_settings = self._load_settings()
-
-    # ------------------------------------------------------------------
-    # Settings load/save
-    # ------------------------------------------------------------------
-    def _load_settings(self):
-        """Load previous settings from JSON file."""
-        if not os.path.exists(SETTINGS_FILE):
-            return {}
-        try:
-            with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            return {}
-
-    def _save_settings(self, settings):
-        """Save settings to JSON file (atomic)."""
-        tmp = SETTINGS_FILE + '.tmp'
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump(settings, f, indent=2)
-        os.replace(tmp, SETTINGS_FILE)
 
     # ------------------------------------------------------------------
     # Time budget helper
@@ -2920,24 +2893,17 @@ class UnifiedCompressor:
         start_time = time.time()
         best_candidate = None
         best_len = float('inf')
-        best_sequence = ()
-        best_header = None
 
         budget = self._time_budget(time_limit, ask_on_expire)
 
-        def try_candidate(header: bytes, transformed: bytes, seq: Tuple[int, ...]):
-            nonlocal best_candidate, best_len, best_sequence, best_header
+        def try_candidate(header: bytes, transformed: bytes):
+            nonlocal best_candidate, best_len
             candidate = header + self._compress_backend(transformed)
             if len(candidate) < best_len:
                 best_candidate = candidate
                 best_len = len(candidate)
-                best_sequence = seq
-                best_header = header
 
-        # Raw fallback
-        try_candidate(self._encode_marker_raw(), data, ())
-
-        # Single transforms
+        try_candidate(self._encode_marker_raw(), data)
         for t in range(1, 257):
             if budget.expired():
                 break
@@ -2945,11 +2911,10 @@ class UnifiedCompressor:
                 transformed = self.fwd_transforms[t](data)
                 if not self._verify_lossless(data, transformed, self.rev_transforms[t]):
                     continue
-                try_candidate(self._encode_marker_single(t), transformed, (t,))
+                try_candidate(self._encode_marker_single(t), transformed)
             except (TransformError, Exception):
                 continue
 
-        # Pairs (Ultra)
         if ultra:
             for t1, t2 in self.sequences:
                 if budget.expired():
@@ -2959,33 +2924,21 @@ class UnifiedCompressor:
                     if not self._verify_lossless(data, transformed, self.rev_transforms[t1]):
                         continue
                     transformed = self.fwd_transforms[t2](transformed)
-                    if not self._verify_lossless(data, transformed,
+                    if not self._verify_lossless(data, transformed, 
                         lambda d: self.rev_transforms[t1](self.rev_transforms[t2](d))):
                         continue
-                    try_candidate(self._encode_marker_pair(t1, t2), transformed, (t1, t2))
+                    try_candidate(self._encode_marker_pair(t1, t2), transformed)
                 except (TransformError, Exception):
                     continue
 
         if best_candidate is None:
             best_candidate = self._encode_marker_raw() + self._compress_backend(data)
-            best_sequence = ()
-            best_header = self._encode_marker_raw()
 
         # Final verification
         decomp, _ = self._decompress_auto(best_candidate)
         if decomp == data:
-            self._save_settings({
-                'last_time_limit': time_limit,
-                'best_sequence': list(best_sequence),
-                'best_header': best_header.hex() if best_header else None,
-                'original_size': len(data),
-                'compressed_size': len(best_candidate),
-                'mode': 'verification',
-                'timestamp': time.time(),
-            })
             return best_candidate
 
-        # Fallback
         fallback = self._encode_marker_raw() + self._compress_backend(data)
         decomp_fb, _ = self._decompress_auto(fallback)
         if decomp_fb != data:
@@ -3000,8 +2953,6 @@ class UnifiedCompressor:
         start_time = time.time()
         best_candidate = None
         best_len = float('inf')
-        best_sequence = ()
-        best_header = None
         raw_header = self._encode_marker_raw()
         raw_candidate = raw_header + self._compress_backend(data)
         best_candidate = raw_candidate
@@ -3026,8 +2977,6 @@ class UnifiedCompressor:
             if len(candidate) < best_len:
                 best_candidate = candidate
                 best_len = len(candidate)
-                best_sequence = (t1, t2)
-                best_header = self._encode_marker_pair(t1, t2)
 
         # Random multi‑pair sequences
         num_pairs = len(self.sequences)
@@ -3053,8 +3002,6 @@ class UnifiedCompressor:
             if len(candidate) < best_len:
                 best_candidate = candidate
                 best_len = len(candidate)
-                best_sequence = tuple(item for idx in seq_indices for item in self.pair_lookup[idx])
-                best_header = header
 
         decomp, _ = self._decompress_auto(best_candidate)
         if decomp != data:
@@ -3062,15 +3009,6 @@ class UnifiedCompressor:
             if self._decompress_auto(fallback)[0] != data:
                 raise RuntimeError("Fallback compression failed")
             return fallback
-        self._save_settings({
-            'last_time_limit': time_limit,
-            'best_sequence': list(best_sequence),
-            'best_header': best_header.hex() if best_header else None,
-            'original_size': len(data),
-            'compressed_size': len(best_candidate),
-            'mode': 'deep_ultra',
-            'timestamp': time.time(),
-        })
         return best_candidate
 
     def _reverse_deep_sequence(self, data: bytes, pair_indices: List[int]) -> bytes:
@@ -3090,8 +3028,6 @@ class UnifiedCompressor:
         start_time = time.time()
         best_candidate = None
         best_len = float('inf')
-        best_sequence = ()
-        best_header = None
         raw_header = self._encode_marker_raw()
         raw_candidate = raw_header + self._compress_backend(data)
         best_candidate = raw_candidate
@@ -3110,8 +3046,6 @@ class UnifiedCompressor:
                 if len(candidate) < best_len:
                     best_candidate = candidate
                     best_len = len(candidate)
-                    best_sequence = (t,)
-                    best_header = self._encode_marker_single(t)
             except (TransformError, Exception):
                 continue
 
@@ -3131,8 +3065,6 @@ class UnifiedCompressor:
                     if len(candidate) < best_len:
                         best_candidate = candidate
                         best_len = len(candidate)
-                        best_sequence = (t1, t2)
-                        best_header = self._encode_marker_pair(t1, t2)
                 except (TransformError, Exception):
                     continue
 
@@ -3154,8 +3086,6 @@ class UnifiedCompressor:
             if len(candidate) < best_len:
                 best_candidate = candidate
                 best_len = len(candidate)
-                best_sequence = tuple(item for idx in seq_indices for item in self.pair_lookup[idx])
-                best_header = header
 
         decomp, _ = self._decompress_auto(best_candidate)
         if decomp != data:
@@ -3163,15 +3093,6 @@ class UnifiedCompressor:
             if self._decompress_auto(fallback)[0] != data:
                 raise RuntimeError("Ultra++ fallback compression failed")
             return fallback
-        self._save_settings({
-            'last_time_limit': time_limit,
-            'best_sequence': list(best_sequence),
-            'best_header': best_header.hex() if best_header else None,
-            'original_size': len(data),
-            'compressed_size': len(best_candidate),
-            'mode': 'ultra_plus',
-            'timestamp': time.time(),
-        })
         return best_candidate
 
     def compress_file_ultra_plus(self, infile: str, outfile: str = "", time_limit: float = 300.0,
@@ -3219,29 +3140,25 @@ class UnifiedCompressor:
         start_time = time.time()
         best_candidate = None
         best_len = float('inf')
-        best_sequence = ()
-        best_header = None
 
         budget = self._time_budget(time_limit, ask_on_expire)
 
-        def try_candidate(header: bytes, transformed: bytes, seq: Tuple[int, ...]):
-            nonlocal best_candidate, best_len, best_sequence, best_header
+        def try_candidate(header: bytes, transformed: bytes):
+            nonlocal best_candidate, best_len
             lzh = self._encode_lzh(transformed)
             candidate = header + b'\xFF' + lzh
             if len(candidate) < best_len:
                 best_candidate = candidate
                 best_len = len(candidate)
-                best_sequence = seq
-                best_header = header
 
-        try_candidate(self._encode_marker_raw(), data, ())
+        try_candidate(self._encode_marker_raw(), data)
         for t in range(1, 257):
             if budget.expired(): break
             try:
                 transformed = self.fwd_transforms[t](data)
                 if not self._verify_lossless(data, transformed, self.rev_transforms[t]):
                     continue
-                try_candidate(self._encode_marker_single(t), transformed, (t,))
+                try_candidate(self._encode_marker_single(t), transformed)
             except (TransformError, Exception): continue
 
         if ultra:
@@ -3255,7 +3172,7 @@ class UnifiedCompressor:
                     if not self._verify_lossless(data, transformed,
                         lambda d: self.rev_transforms[t1](self.rev_transforms[t2](d))):
                         continue
-                    try_candidate(self._encode_marker_pair(t1, t2), transformed, (t1, t2))
+                    try_candidate(self._encode_marker_pair(t1, t2), transformed)
                 except (TransformError, Exception): continue
 
         if best_candidate is None:
@@ -3267,15 +3184,6 @@ class UnifiedCompressor:
 
         decomp = self._decompress_lzh_pipeline(best_candidate)
         if decomp == data:
-            self._save_settings({
-                'last_time_limit': time_limit,
-                'best_sequence': list(best_sequence),
-                'best_header': best_header.hex() if best_header else None,
-                'original_size': len(data),
-                'compressed_size': len(best_candidate),
-                'mode': 'lzh',
-                'timestamp': time.time(),
-            })
             return best_candidate
 
         fallback = self._encode_marker_raw() + self._compress_backend(data)
