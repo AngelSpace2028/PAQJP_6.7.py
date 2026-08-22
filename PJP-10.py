@@ -30,6 +30,7 @@ import sys
 import subprocess
 import importlib
 import time
+import zlib  # For CRC32 in Huffman transform
 from typing import Optional, List, Tuple, Dict, Callable, Any
 from collections import Counter
 
@@ -992,15 +993,15 @@ class UnifiedCompressor:
         except Exception as e:
             raise TransformError(f"Base64 decode failed: {e}")
 
-    # 23 – Reversible tokenizer with raw fallback
+    # 23 – Reversible tokenizer with raw fallback (NOW UNCONDITIONALLY LOSSLESS)
     def transform_23(self, data: bytes) -> bytes:
-        # Raw fallback flag = 0, tokenized = 1
         if not data:
-            return b'\x00'                      # raw empty
+            return b'\x00' + struct.pack('>I', 0)  # raw flag + length 0
         try:
             text = data.decode('utf-8')
         except UnicodeDecodeError:
-            return b'\x00' + data
+            # raw storage: flag 0 + original length + raw bytes
+            return b'\x00' + struct.pack('>I', len(data)) + data
 
         pattern = r'([A-Za-z0-9_]+)'
         tokens = re.split(pattern, text)
@@ -1023,7 +1024,9 @@ class UnifiedCompressor:
                 token_stream.append((0, literal_bytes))
 
         out = bytearray()
-        out.append(1)                           # tokenized flag
+        # Now header: flag=1, original length (4 bytes), then tokenized data
+        out += b'\x01'
+        out += struct.pack('>I', len(data))
         out += struct.pack('>I', len(word_list))
         for wb in word_list:
             out += struct.pack('>I', len(wb))
@@ -1038,21 +1041,27 @@ class UnifiedCompressor:
                 out += payload
 
         tokenized = bytes(out)
+        # Verify (just in case)
         try:
             if self.reverse_transform_23(tokenized) == data:
                 return tokenized
         except Exception:
             pass
-        return b'\x00' + data
+        # Should not happen, but fallback to raw with length
+        return b'\x00' + struct.pack('>I', len(data)) + data
 
     def reverse_transform_23(self, data: bytes) -> bytes:
         if not data:
             return b''
+        if len(data) < 5:
+            raise TransformError("Transform 23 reverse: data too short")
         flag = data[0]
+        orig_len = struct.unpack('>I', data[1:5])[0]
         if flag == 0:
-            return data[1:]
-        if flag == 1:
-            pos = 1
+            # raw mode
+            return data[5:5+orig_len]
+        elif flag == 1:
+            pos = 5
             if len(data) < pos + 4:
                 raise TransformError("Transform 23 reverse: data too short")
             num_words = struct.unpack('>I', data[pos:pos+4])[0]
@@ -1092,10 +1101,14 @@ class UnifiedCompressor:
                     pos += lit_len
                 else:
                     raise TransformError(f"Transform 23 reverse: unknown token type {typ}")
-            return bytes(out)
+            result = bytes(out)
+            if len(result) != orig_len:
+                raise TransformError("Transform 23 reverse: length mismatch")
+            return result
         else:
             raise TransformError("Transform 23 reverse: invalid flag")
 
+    # 24 is an alias to 23
     def transform_24(self, data: bytes) -> bytes:
         return self.transform_23(data)
 
@@ -2076,7 +2089,7 @@ class UnifiedCompressor:
         except Exception as e:
             raise TransformError(f"Base64 decode (44) failed: {e}")
 
-    # 45 Huffman (from PAQJP) - FIXED for lossless
+    # 45 Huffman (from PAQJP) - NOW WITH CRC32 FOR GUARANTEED INTEGRITY
     @staticmethod
     def _huffman_code_lengths(freq: List[int]) -> List[int]:
         heap = [(f, i, i) for i, f in enumerate(freq) if f > 0]
@@ -2134,6 +2147,9 @@ class UnifiedCompressor:
         header = bytearray()
         header.extend(len(data).to_bytes(4, 'big'))
         header.extend(code_lengths)
+        # Add CRC32 of original data for integrity checking
+        crc = zlib.crc32(data) & 0xFFFFFFFF
+        header.extend(crc.to_bytes(4, 'big'))
         bits = []
         for b in data:
             c, cl = codes[b]
@@ -2152,11 +2168,12 @@ class UnifiedCompressor:
     def reverse_transform_45(self, data: bytes) -> bytes:
         if not data:
             return b''
-        if len(data) < 4 + 256:
+        if len(data) < 4 + 256 + 4:   # length + code lengths + crc
             raise TransformError("Huffman reverse: data too short")
         original_len = int.from_bytes(data[:4], 'big')
         code_lengths = list(data[4:4+256])
-        payload = data[4+256:]
+        stored_crc = int.from_bytes(data[4+256:4+256+4], 'big')
+        payload = data[4+256+4:]
         if original_len == 0:
             return b''
         # Validate code lengths
@@ -2204,6 +2221,9 @@ class UnifiedCompressor:
                 raise TransformError(f"Huffman reverse: no symbol found at bit position {pos}")
         if len(out) != original_len:
             raise TransformError(f"Huffman reverse: decoded {len(out)} bytes, expected {original_len}")
+        # Verify CRC
+        if (zlib.crc32(bytes(out)) & 0xFFFFFFFF) != stored_crc:
+            raise TransformError("Huffman reverse: CRC mismatch")
         return bytes(out)
 
     # 46 power-of-2 mask
