@@ -436,13 +436,13 @@ class UnifiedCompressor:
         if n < 1: return 0, True
         true_digits = self.get_pi_digits(n)
         true_scaled = int(self.PI_STR.replace('.', '')[:n + 1])
-        DENOM = 16777216
+        Denominator_factor = 16777216
         decimal.getcontext().prec = 50
         pi_dec = decimal.Decimal(self.PI_STR)
-        k_float = (pi_dec - 3) * DENOM
+        k_float = (pi_dec - 3) * Denominator_factor
         k_candidate = int(round(k_float))
-        k_candidate = max(0, min(k_candidate, DENOM - 1))
-        approx_scaled = (3 * 10 ** n * DENOM + k_candidate * 10 ** n) // DENOM
+        k_candidate = max(0, min(k_candidate, Denominator_factor - 1))
+        approx_scaled = (3 * 10 ** n * Denominator_factor + k_candidate * 10 ** n) // Denominator_factor
         return k_candidate, approx_scaled == true_scaled
 
     def to_bin(self, value: int, bits: int) -> str:
