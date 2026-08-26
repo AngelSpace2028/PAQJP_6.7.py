@@ -1,4 +1,4 @@
-UPGRADE\_PAQJPVG It’s mostly for Quantum Compression, Compression hybrid Software Quantum software is working correctly without bugs and without Errors, The best PJP-10
+UPGRADE\_PAQJPVG It’s mostly for Quantum Compression, Compression hybrid Software Quantum software is working correctly without bugs and without Errors, The best PJP-11
 
 PAQJPVG_8.5-4 Replit App by Jurijus Pacalovas 8.5L-4 PAQ level 9 and zstandard level 22 app
 
@@ -31,6 +31,6 @@ Group: Jurijus Pacalovas and Vincent Geoghegan helped add 1 byte to the front ma
 Here is Portfolio UPGRADE_PAQJPVG
 We have written 1 version of software and I helped a little bit Vincent Geoghegan
 
-PJP-10
+PJP-11
 
-The best of the best PJP-10
+The best of the best PJP-11
