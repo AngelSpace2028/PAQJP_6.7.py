@@ -306,6 +306,27 @@ class DecompressionError(Exception):
     """Raised when decompression fails."""
     pass
 
+def mod_inv(a: int, m: int) -> Optional[int]:
+    """Compute modular inverse of a modulo m using extended Euclidean algorithm."""
+    if a == 0:
+        return None
+    m0 = m
+    y = 0
+    x = 1
+    if m == 1:
+        return 0
+    while a > 1:
+        q = a // m
+        t = m
+        m = a % m
+        a = t
+        t = y
+        y = x - q * y
+        x = t
+    if x < 0:
+        x = x + m0
+    return x
+
 # ------------------------------------------------------------------
 # Main Compressor Class – Unified (Single transforms only)
 # ------------------------------------------------------------------
@@ -1634,6 +1655,7 @@ class UnifiedCompressor:
                     out.append(b)
         return bytes(out[:orig_len])
 
+    # FIXED: _paqjp_transform_25 and _paqjp_reverse_25 using proper modular arithmetic
     def _paqjp_transform_25(self, data: bytes) -> bytes:
         if not data:
             return b'\x01'
@@ -1642,16 +1664,19 @@ class UnifiedCompressor:
         for i in range(len(res)):
             res[i] = (pow(res[i] + 1, n, 257) - 1) & 0xFF
         return bytes([n]) + bytes(res)
+
     def _paqjp_reverse_25(self, data: bytes) -> bytes:
         if data == b'\x01':
             return b''
         if not data or len(data) < 2:
             raise TransformError("FLT 25 reverse: data too short")
         n = data[0]
-        inv = pow(n, -1, 256)
+        inv_n = mod_inv(n, 256)
+        if inv_n is None:
+            raise TransformError(f"FLT 25 reverse: {n} not invertible modulo 256")
         res = bytearray(data[1:])
         for i in range(len(res)):
-            res[i] = (pow(res[i] + 1, inv, 257) - 1) & 0xFF
+            res[i] = (pow(res[i] + 1, inv_n, 257) - 1) & 0xFF
         return bytes(res)
 
     def _paqjp_transform_26(self, data: bytes) -> bytes:
@@ -1665,6 +1690,7 @@ class UnifiedCompressor:
         for i in range(len(res)):
             res[i] = (pow(res[i] + 1, e, 257) - 1) & 0xFF
         return bytes([n & 0xFF, (n >> 8) & 0xFF]) + bytes(res)
+    
     def _paqjp_reverse_26(self, data: bytes) -> bytes:
         if data == b'\x01\x00':
             return b''
@@ -1674,7 +1700,9 @@ class UnifiedCompressor:
         if n % 2 == 0:
             n ^= 1
         e = pow(n, 16777216, 256) | 1
-        inv_e = pow(e, -1, 256)
+        inv_e = mod_inv(e, 256)
+        if inv_e is None:
+            raise TransformError(f"FLT 26 reverse: {e} not invertible modulo 256")
         res = bytearray(data[2:])
         for i in range(len(res)):
             res[i] = (pow(res[i] + 1, inv_e, 257) - 1) & 0xFF
@@ -1706,6 +1734,7 @@ class UnifiedCompressor:
             out.append((n >> 8) & 0xFF)
             out.extend(transformed)
         return bytes(out)
+    
     def _paqjp_reverse_27(self, data: bytes) -> bytes:
         if not data or len(data) < 4:
             raise TransformError("FLT 27 reverse: data too short")
@@ -1728,7 +1757,9 @@ class UnifiedCompressor:
             n |= 1
             e = pow(n, 16777216, 256) | 1
             e200 = pow(e, 200, 256)
-            inv_e200 = pow(e200, -1, 256)
+            inv_e200 = mod_inv(e200, 256)
+            if inv_e200 is None:
+                raise TransformError(f"FLT 27 reverse: {e200} not invertible modulo 256")
             for i in range(BLOCK_SIZE):
                 decoded.append((pow(chunk[i] + 1, inv_e200, 257) - 1) & 0xFF)
         return bytes(decoded[:orig_len])
@@ -1824,7 +1855,9 @@ class UnifiedCompressor:
             n |= 1
             e = pow(n, 16777216, 256) | 1
             e200 = pow(e, 200, 256)
-            inv_e200 = pow(e200, -1, 256)
+            inv_e200 = mod_inv(e200, 256)
+            if inv_e200 is None:
+                raise TransformError(f"FLT 28 reverse: {e200} not invertible modulo 256")
             transformed = bytearray(block)
             for i in range(len(transformed)):
                 transformed[i] = (pow(transformed[i] + 1, inv_e200, 257) - 1) & 0xFF
@@ -2262,20 +2295,44 @@ class UnifiedCompressor:
         self.fwd_transforms[34] = self._paqjp_transform_24
         self.rev_transforms[34] = self._paqjp_reverse_24
 
-        self.fwd_transforms[35] = self._paqjp_transform_25; self.rev_transforms[35] = self._paqjp_reverse_25
-        self.fwd_transforms[36] = self._paqjp_transform_26; self.rev_transforms[36] = self._paqjp_reverse_26
-        self.fwd_transforms[37] = self._paqjp_transform_27; self.rev_transforms[37] = self._paqjp_reverse_27
-        self.fwd_transforms[38] = self._paqjp_transform_28; self.rev_transforms[38] = self._paqjp_reverse_28
-        self.fwd_transforms[39] = self._paqjp_transform_29; self.rev_transforms[39] = self._paqjp_reverse_29
-        self.fwd_transforms[40] = self._paqjp_transform_30; self.rev_transforms[40] = self._paqjp_reverse_30
+        self.fwd_transforms[35] = self._paqjp_transform_25
+        self.rev_transforms[35] = self._paqjp_reverse_25
+        
+        self.fwd_transforms[36] = self._paqjp_transform_26
+        self.rev_transforms[36] = self._paqjp_reverse_26
+        
+        self.fwd_transforms[37] = self._paqjp_transform_27
+        self.rev_transforms[37] = self._paqjp_reverse_27
+        
+        self.fwd_transforms[38] = self._paqjp_transform_28
+        self.rev_transforms[38] = self._paqjp_reverse_28
+        
+        self.fwd_transforms[39] = self._paqjp_transform_29
+        self.rev_transforms[39] = self._paqjp_reverse_29
+        
+        self.fwd_transforms[40] = self._paqjp_transform_30
+        self.rev_transforms[40] = self._paqjp_reverse_30
 
-        self.fwd_transforms[41] = self.transform_41; self.rev_transforms[41] = self.reverse_transform_41
-        self.fwd_transforms[42] = self.transform_42; self.rev_transforms[42] = self.reverse_transform_42
-        self.fwd_transforms[43] = self.transform_43; self.rev_transforms[43] = self.reverse_transform_43
-        self.fwd_transforms[44] = self.transform_44; self.rev_transforms[44] = self.reverse_transform_44
-        self.fwd_transforms[45] = self.transform_45; self.rev_transforms[45] = self.reverse_transform_45
-        self.fwd_transforms[46] = self.transform_46; self.rev_transforms[46] = self.reverse_transform_46
-        self.fwd_transforms[47] = self.transform_47; self.rev_transforms[47] = self.reverse_transform_47
+        self.fwd_transforms[41] = self.transform_41
+        self.rev_transforms[41] = self.reverse_transform_41
+        
+        self.fwd_transforms[42] = self.transform_42
+        self.rev_transforms[42] = self.reverse_transform_42
+        
+        self.fwd_transforms[43] = self.transform_43
+        self.rev_transforms[43] = self.reverse_transform_43
+        
+        self.fwd_transforms[44] = self.transform_44
+        self.rev_transforms[44] = self.reverse_transform_44
+        
+        self.fwd_transforms[45] = self.transform_45
+        self.rev_transforms[45] = self.reverse_transform_45
+        
+        self.fwd_transforms[46] = self.transform_46
+        self.rev_transforms[46] = self.reverse_transform_46
+        
+        self.fwd_transforms[47] = self.transform_47
+        self.rev_transforms[47] = self.reverse_transform_47
 
         for i in range(48, 57):
             fwd, rev = self._dynamic_transform(i)
