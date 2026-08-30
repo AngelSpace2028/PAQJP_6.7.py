@@ -17,7 +17,7 @@ pip install cython
 
 pip install paq
 
-UPGRADE\_PAQJPVG Compression 256 transformations and 65535 pairs losslessness Lossless 100% and without corrupted files (choose the best of 255 transformations and extract back) done code 12 February lossless 100%, but Explain 16 February Lossless 100% 2026 count 281 trillions variations Speed compress 170 bytes-1.3KB/s 3.5 KB/s extract 11Mb/s 80-97% pro-cents compress
+UPGRADE\_PAQJPVG Compression 256 transformations losslessness Lossless 100% and without corrupted files (choose the best of 255 transformations and extract back) done code 12 February lossless 100%, but Explain 16 February Lossless 100% 2026 count 281 trillions variations Speed compress bytes-1.3KB/s; 3.5 KB/s extract 11Mb/s 80-97% pro-cents compress
 
 
 
@@ -31,6 +31,6 @@ Group: Jurijus Pacalovas and Vincent Geoghegan helped add 1 byte to the front ma
 Here is Portfolio UPGRADE_PAQJPVG
 We have written 1 version of software and I helped a little bit Vincent Geoghegan
 
-PJP-11
+PJP-9
 
-The best of the best PJP-11
+The best of the best PJP-9
